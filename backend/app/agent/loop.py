@@ -177,7 +177,7 @@ def run_task_loop(
             _add_event(session, task_id, "approval_request", {"tool_name": tool_name, "arguments": arguments})
             return
 
-        ctx = ToolContext(task_id=task_id, session=session)
+        ctx = ToolContext(task_id=task_id, session=session, scheduler=scheduler)
         try:
             result = tool.run(arguments, ctx)
         except (KeyError, TypeError, ValueError, httpx.HTTPError) as exc:
@@ -188,5 +188,10 @@ def run_task_loop(
 
         if tool_name == "ask_user" and result.get("ok"):
             task.status = "awaiting_answer"
+            session.commit()
+            return
+
+        if tool_name == "delegate_task" and result.get("ok") and arguments.get("mode") == "blocking":
+            task.status = "awaiting_subtask"
             session.commit()
             return

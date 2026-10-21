@@ -273,9 +273,49 @@ class Scheduler:
             self._on_task_terminal(task_id)
 
     def _on_task_terminal(self, task_id: int) -> None:
-        """No-op stub for this task. Delegation-aware parent handling is
-        added in a later task."""
-        pass
+        """When a (possibly delegated) task reaches a terminal state, let its
+        parent (if any) know: append a subtask_update event onto the parent
+        describing this child's outcome, and re-enqueue the parent if it was
+        specifically waiting on this -- blocking delegation (awaiting_subtask)
+        or the one-shot background nudge (awaiting_answer/awaiting_approval).
+        If the parent is still "running" or already terminal itself, do
+        nothing further."""
+        session = self.session_factory()
+        try:
+            child = session.get(Task, task_id)
+            if child is None or child.parent_task_id is None:
+                return
+            parent = session.get(Task, child.parent_task_id)
+            if parent is None:
+                return
+
+            last_content = None
+            last_step = (
+                session.query(Event)
+                .filter_by(task_id=task_id, type="model_step")
+                .order_by(Event.id.desc())
+                .first()
+            )
+            if last_step is not None:
+                last_content = last_step.payload.get("content")
+
+            session.add(
+                Event(
+                    task_id=parent.id,
+                    type="subtask_update",
+                    payload={
+                        "subtask_id": task_id,
+                        "status": child.status,
+                        "content": last_content,
+                    },
+                )
+            )
+            session.commit()
+
+            if parent.status in ("awaiting_subtask", "awaiting_answer", "awaiting_approval"):
+                self.enqueue(session, parent.id, front=True)
+        finally:
+            session.close()
 
     def enqueue(self, session: Session, task_id: int, front: bool = False) -> None:
         with self._lock:

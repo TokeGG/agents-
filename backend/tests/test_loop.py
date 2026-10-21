@@ -4,7 +4,8 @@ import httpx
 
 from app.agent.loop import run_task_loop
 from app.agent.model_adapter import FakeModelAdapter
-from app.agent.tools import ToolRegistry, ask_user_tool, http_get_tool, report_gap_tool
+from app.agent.tools import ToolRegistry, ask_user_tool, delegate_task_tool, http_get_tool, report_gap_tool
+from tests.test_tools import FakeSchedulerSpy
 from app.models import Event, Task
 
 
@@ -125,6 +126,17 @@ def test_loop_stops_immediately_when_interrupt_event_already_set(db_session, tas
     assert refreshed.status == "interrupted"
     gap = db_session.query(Event).filter_by(task_id=task.id, type="report_gap").one()
     assert "stopped by kill switch" in gap.payload["reason"]
+
+
+def test_loop_pauses_on_blocking_delegate_task(db_session, task):
+    adapter = FakeModelAdapter(script=[
+        {"type": "tool_call", "tool_name": "delegate_task", "arguments": {"description": "x", "mode": "blocking"}},
+    ])
+    registry = ToolRegistry()
+    registry.register(delegate_task_tool)
+    scheduler = FakeSchedulerSpy()
+    run_task_loop(task.id, db_session, adapter, registry, scheduler=scheduler)
+    assert db_session.get(Task, task.id).status == "awaiting_subtask"
 
 
 def test_steps_taken_persists_across_resume(db_session, task):

@@ -6,7 +6,14 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_auth
 from app.agent.model_adapter import ModelAdapter, OpenAICompatAdapter
-from app.agent.tools import ToolRegistry, ask_user_tool, http_get_tool, report_gap_tool
+from app.agent.tools import (
+    ToolRegistry,
+    ask_user_tool,
+    check_subtask_tool,
+    delegate_task_tool,
+    http_get_tool,
+    report_gap_tool,
+)
 from app.db import get_session
 from app.models import Event, Rating, Task
 from app.agent.tools import ToolContext
@@ -34,6 +41,8 @@ def get_registry() -> ToolRegistry:
     registry.register(http_get_tool)
     registry.register(ask_user_tool)
     registry.register(report_gap_tool)
+    registry.register(delegate_task_tool)
+    registry.register(check_subtask_tool)
     return registry
 
 
@@ -136,7 +145,7 @@ def approve_task(
                 "data": None,
             }
         else:
-            ctx = ToolContext(task_id=task_id, session=session)
+            ctx = ToolContext(task_id=task_id, session=session, scheduler=scheduler)
             try:
                 result = tool.run(arguments, ctx)
             except (KeyError, TypeError, ValueError, httpx.HTTPError) as exc:
