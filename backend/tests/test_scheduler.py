@@ -247,6 +247,21 @@ def test_on_task_terminal_reenqueues_parent_awaiting_answer(db_session, session_
     assert refreshed_parent.queue_position is not None
 
 
+def test_pop_next_skips_task_id_already_running(db_session, session_factory):
+    """A task id present in self._running has a run in flight right now and
+    must never be popped again, even if its status reads "queued" (e.g. a
+    delegation re-enqueue landing while its own first run hasn't finished
+    yet) -- otherwise it could be started a second time concurrently."""
+    scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=3)
+    tid = make_queued_task(db_session)
+    scheduler._running[tid] = object()  # fake in-flight asyncio.Task entry
+
+    assert scheduler._pop_next(db_session) is None
+
+    del scheduler._running[tid]
+    assert scheduler._pop_next(db_session).id == tid
+
+
 def test_urgent_task_is_popped_before_older_non_urgent_tasks(db_session, session_factory):
     scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=1)
     old1 = make_queued_task(db_session)

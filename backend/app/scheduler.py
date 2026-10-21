@@ -207,9 +207,19 @@ class Scheduler:
                 raise
 
     def _pop_next(self, session: Session) -> Optional[Task]:
+        # A task id already present in self._running has a run in flight
+        # right now (by this Scheduler instance) and must never be popped
+        # again until that run finishes and removes itself from
+        # self._running -- otherwise a delegation re-enqueue that lands
+        # while the parent's own first run hasn't finished writing its
+        # tool_result/returning yet (see _on_task_terminal) could start a
+        # second, concurrent run of the same task, corrupting cap
+        # accounting (self._running/self._interrupt_events) and interleaving
+        # history writes between the two runs.
+        running_ids = list(self._running.keys())
         urgent = (
             session.query(Task)
-            .filter(Task.status == "queued", Task.urgent.is_(True))
+            .filter(Task.status == "queued", Task.urgent.is_(True), Task.id.notin_(running_ids))
             .order_by(Task.queue_position.asc())
             .first()
         )
@@ -217,7 +227,7 @@ class Scheduler:
             return urgent
         return (
             session.query(Task)
-            .filter(Task.status == "queued")
+            .filter(Task.status == "queued", Task.id.notin_(running_ids))
             .order_by(Task.queue_position.asc())
             .first()
         )

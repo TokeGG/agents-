@@ -77,11 +77,16 @@ def _build_initial_messages(session: Session, task: Task) -> list[dict]:
         elif event.type == "approval_response":
             messages.append({"role": "user", "content": f"approved={event.payload.get('approved')}"})
         elif event.type == "subtask_update":
+            # Informational context for the model, not a literal response to
+            # a specific tool call (the tool_call_id that originally
+            # requested this delegation was already answered by the
+            # replayed tool_result "delegated as subtask N") -- a real
+            # OpenAI-style API requires each tool_call_id to answer exactly
+            # one pending call, so this must not be a "tool" role message.
             payload = event.payload
             messages.append(
                 {
-                    "role": "tool",
-                    "tool_call_id": last_call_id,
+                    "role": "user",
                     "content": (
                         f"subtask {payload.get('subtask_id')} finished with status "
                         f"'{payload.get('status')}': {payload.get('content')}"
