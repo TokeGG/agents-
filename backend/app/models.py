@@ -20,6 +20,12 @@ class Task(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="running")
     full_auto: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    queue_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    urgent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    parent_task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
+    agent_type: Mapped[str] = mapped_column(String, nullable=False, default="general")
+    delegation_depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    steps_taken: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class Event(Base):
