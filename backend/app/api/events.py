@@ -3,6 +3,7 @@ import asyncio
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
+from app.auth import require_auth_ws
 from app.db import get_session
 from app.models import Event
 
@@ -12,7 +13,12 @@ POLL_INTERVAL_SECONDS = 0.2
 
 
 @router.websocket("/tasks/{task_id}/stream")
-async def stream_task_events(websocket: WebSocket, task_id: int, session: Session = Depends(get_session)):
+async def stream_task_events(
+    websocket: WebSocket,
+    task_id: int,
+    session: Session = Depends(get_session),
+    _auth: None = Depends(require_auth_ws),
+):
     await websocket.accept()
     last_id_sent = 0
     try:

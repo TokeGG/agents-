@@ -4,6 +4,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.auth import require_auth
 from app.agent.loop import run_task_loop
 from app.agent.model_adapter import ModelAdapter, OpenAICompatAdapter
 from app.agent.tools import ToolRegistry, ask_user_tool, http_get_tool, report_gap_tool
@@ -18,7 +19,7 @@ from app.schemas import (
     RateTaskRequest,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 def get_adapter() -> ModelAdapter:
