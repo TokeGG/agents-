@@ -183,13 +183,25 @@ class Scheduler:
                         task = self._pop_next(session)
                         if task is not None:
                             task_id = task.id
+                            # Register the interrupt_event *before* committing
+                            # status="running", so there is no window where a
+                            # task is "running" in the DB but kill_task can
+                            # find neither a WAITING_STATUSES row to flip nor
+                            # a registered interrupt_event to signal (a kill
+                            # landing in such a gap would silently do
+                            # nothing). _run_one reuses this same event
+                            # instead of creating its own.
+                            interrupt_event = threading.Event()
+                            self._interrupt_events[task_id] = interrupt_event
                             task.status = "running"
                             session.commit()
                     finally:
                         session.close()
                     if task is None:
                         break
-                    self._running[task_id] = asyncio.create_task(self._run_one(task_id))
+                    self._running[task_id] = asyncio.create_task(
+                        self._run_one(task_id, interrupt_event)
+                    )
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
             except asyncio.CancelledError:
                 raise
@@ -210,8 +222,13 @@ class Scheduler:
             .first()
         )
 
-    async def _run_one(self, task_id: int) -> None:
-        interrupt_event = threading.Event()
+    async def _run_one(self, task_id: int, interrupt_event: Optional[threading.Event] = None) -> None:
+        # The caller (_loop_forever) registers and passes the interrupt_event
+        # up front, atomically with marking the task "running", to close the
+        # race window described there. Fall back to creating one here for any
+        # other caller (e.g. tests that invoke _run_one directly).
+        if interrupt_event is None:
+            interrupt_event = threading.Event()
         self._interrupt_events[task_id] = interrupt_event
         session = self.session_factory()
         try:
