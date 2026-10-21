@@ -47,6 +47,12 @@ Success looks like:
 
 ## 3. Architecture
 
+**Concurrency & resource limits:** the VPS (4 vCPU/8GB) caps concurrent
+sandbox containers at a configurable max (default 3); additional agent
+tasks queue until a slot frees. Each sandbox has hard CPU/RAM/time
+limits (Section 3 table, Sandbox manager) so one runaway task can't
+starve the others or the host.
+
 | Component | Job | Talks to |
 |---|---|---|
 | Gateway (Caddy) | HTTPS + login (passkey/password + 2FA); only public entry point | Web, API |
@@ -62,6 +68,11 @@ Success looks like:
 | Memory & learning | Lessons, praise ratings, task history, retrieval at prompt time | Postgres |
 | Vault | Encrypted per-service credentials, filled once by user | API |
 | Postgres (+pgvector) | Single store for all persistent state | everything |
+
+**Sub-task agents** (e.g. the coding agent invoked by the connector
+forge) are children of the parent task: they share the parent's
+resource quota and sandbox slot, and all their events are logged under
+the parent task ID for traceability.
 
 ### Data flow (one task)
 1. User submits task → API creates agent record.
@@ -163,17 +174,38 @@ retrieval store only.
 | Background consolidation | Scheduled worker re-clusters lessons, dedupes contradictions, promotes consistently-praised patterns into the skills library |
 | Phase 2 fine-tuning | Once enough rated trajectories exist (hundreds+): export + combine with seed datasets → LoRA/DPO on rented GPU → swap adapter behind model-adapter interface. Repeatable on a schedule as more data accumulates. |
 
+Each fine-tuning run is tagged with the snapshot ID of the lesson/
+dataset export it used. Resulting model adapters are versioned and kept
+swappable, so a regression can be rolled back to the prior adapter
+without losing the underlying lesson/memory data.
+
 ## 9. Security Model
 
 - Single-user login: passkey or password + mandatory 2FA, behind HTTPS
   (Caddy) — the only public entry point.
 - Agent-run code never executes on the app server; always in a
   disposable, network-restricted Docker sandbox container.
-- Vault for credentials, encrypted at rest, filled once per service by
-  the user.
-- Pentest scope guard enforced at the tool layer, not just policy —
-  out-of-scope execution is blocked in code.
+- Vault for *runtime/connector* credentials (email, APIs, etc.),
+  encrypted at rest, filled once per service by the user via the UI.
+  Separately, *deployment* secrets (model API key, DB password, Caddy
+  config) live only in a VPS-local `.env` outside git, provisioned
+  manually once during setup — never in the app-facing vault, never
+  committed.
+- Pentest scope guard enforced at the tool layer, not just policy — a
+  tool call is allowed only if the target is in the scope record's list
+  AND the current date falls within [start_date, end_date]; otherwise
+  it's blocked in code and routed through `report-gap`.
 - Irreversible-action approval gate as described in Section 4.
+- **Token spend guardrail:** a configurable daily/monthly spend cap on
+  the model API. Crossing a warning threshold alerts the user; crossing
+  the hard cap auto-pauses all agents until raised or reset.
+- **Global kill switch:** a single UI control that immediately halts
+  every running agent and sandbox container, for use if something is
+  behaving unexpectedly.
+- **Postgres backups:** automated nightly `pg_dump` to off-VPS object
+  storage, retained on a rolling window (e.g. 14 days), since Postgres
+  is the single store for all memory, lessons, vault data and scope
+  records — losing it loses all learning to date.
 
 ## 10. Testing & Rollout
 
