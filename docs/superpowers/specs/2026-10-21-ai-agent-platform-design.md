@@ -226,6 +226,16 @@ without losing the underlying lesson/memory data.
 4. Connector forge
 5. Learning loop (memory, praise, retrieval; fine-tuning pipeline deferred to Phase 2 GPU usage)
 6. Specialized agents: personal assistant (+email), pentesting assistant, game designer, coding agent
+7. **Platform Self-Extension** (added 2026-10-21): a privileged orchestrator
+   agent, controllable from the dashboard, that can modify this platform's
+   own source code, run its tests, and redeploy it — so the user does not
+   need to return to a chat session to request platform changes. Deferred
+   until after the connector forge (#4), since it needs the same
+   sandboxed-build-and-test machinery plus a deploy/rollback layer on top
+   (a code change that breaks the platform must not be able to take down
+   the one dashboard used to fix it). Not yet designed — requires its own
+   brainstorm/spec/plan cycle when the earlier sub-projects' infrastructure
+   (sandbox, forge, CI/deploy) is in place.
 
 Each sub-project above gets implemented in this order; this spec covers
 all of them at the design level, with #1 to be planned and built first.
