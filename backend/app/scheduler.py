@@ -8,6 +8,10 @@ from sqlalchemy.orm import Session
 from app.models import Event, Task
 
 POLL_INTERVAL_SECONDS = 0.05
+# How long stop() waits for in-flight task runs to notice their
+# interrupt_event and finish, before giving up on them (best effort: the
+# underlying asyncio.to_thread worker thread cannot be forced to stop).
+STOP_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 class Scheduler:
@@ -36,6 +40,7 @@ class Scheduler:
         self.run_fn = run_fn
 
         self._running: dict[int, asyncio.Task] = {}
+        self._interrupt_events: dict[int, threading.Event] = {}
         self._lock = threading.Lock()
         self._loop_task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
@@ -53,18 +58,25 @@ class Scheduler:
             except asyncio.CancelledError:
                 pass
             self._loop_task = None
-        # Also tear down any in-flight task runs: otherwise they keep running
-        # in background threads (asyncio.to_thread) past this call, which in
-        # tests leaks a stale run into the next test's app/dependency state.
+        # Also ask any in-flight task runs to stop: otherwise they keep
+        # running in background threads (asyncio.to_thread) past this call,
+        # which in tests leaks a stale run into the next test's app/dependency
+        # state. Cancelling the asyncio.Task here would NOT work: it only
+        # cancels the coroutine awaiting asyncio.to_thread, not the real OS
+        # thread running run_fn (to_thread cannot be interrupted), and it
+        # would make _run_one's `finally` close/pop the session while that
+        # thread is still using it (cross-thread Session misuse). Instead,
+        # signal each run's interrupt_event (run_task_loop checks it between
+        # steps and returns) and wait for the real completion, up to a bound.
         running = list(self._running.values())
-        for running_task in running:
-            running_task.cancel()
-        for running_task in running:
-            try:
-                await running_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-        self._running.clear()
+        for interrupt_event in self._interrupt_events.values():
+            interrupt_event.set()
+        if running:
+            await asyncio.wait(running, timeout=STOP_DRAIN_TIMEOUT_SECONDS)
+        # Tasks that finished drop themselves from _running/_interrupt_events
+        # in _run_one's own finally; anything still present here didn't
+        # honor the interrupt in time and is left running in the background
+        # (best effort only - its thread cannot be forced to stop).
 
     async def _loop_forever(self) -> None:
         while True:
@@ -104,6 +116,7 @@ class Scheduler:
 
     async def _run_one(self, task_id: int) -> None:
         interrupt_event = threading.Event()
+        self._interrupt_events[task_id] = interrupt_event
         session = self.session_factory()
         try:
             args = (
@@ -143,6 +156,7 @@ class Scheduler:
         finally:
             session.close()
             self._running.pop(task_id, None)
+            self._interrupt_events.pop(task_id, None)
             self._on_task_terminal(task_id)
 
     def _on_task_terminal(self, task_id: int) -> None:

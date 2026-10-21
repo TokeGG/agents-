@@ -56,10 +56,7 @@ def test_answer_resumes_task_to_completion(client):
     )
     create_response = client.post("/tasks", json={"description": "pick one", "full_auto": False})
     task_id = create_response.json()["id"]
-    status = wait_for_status(client, task_id, "awaiting_answer")
-    if status != "awaiting_answer":
-        print("DEBUG", client.get(f"/tasks/{task_id}").json())
-    assert status == "awaiting_answer"
+    assert wait_for_status(client, task_id, "awaiting_answer") == "awaiting_answer"
 
     client.app.dependency_overrides[tasks_module.get_adapter] = lambda: FakeModelAdapter(
         script=[{"type": "final_answer", "content": "done"}]
