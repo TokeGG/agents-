@@ -16,3 +16,9 @@ def get_session() -> Generator[Session, None, None]:
         yield session
     finally:
         session.close()
+
+
+def get_session_factory():
+    """Returns a callable that creates a new Session, for use by background
+    tasks that must not depend on a request-scoped session's lifetime."""
+    return SessionLocal

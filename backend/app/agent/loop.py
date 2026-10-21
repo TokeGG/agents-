@@ -16,9 +16,26 @@ def _add_event(session: Session, task_id: int, type_: str, payload: dict) -> Non
     session.commit()
 
 
+def _build_initial_messages(session: Session, task: Task) -> list[dict]:
+    """Replay persisted Events into a message history, so a resumed task
+    (answer/approve) continues the same conversation instead of restarting it."""
+    messages = [{"role": "user", "content": task.description}]
+    events = session.query(Event).filter_by(task_id=task.id).order_by(Event.id).all()
+    for event in events:
+        if event.type == "model_step":
+            messages.append({"role": "assistant", "content": str(event.payload)})
+        elif event.type == "tool_result":
+            messages.append({"role": "tool", "content": event.payload.get("output", "")})
+        elif event.type == "user_answer":
+            messages.append({"role": "user", "content": event.payload.get("answer", "")})
+        elif event.type == "approval_response":
+            messages.append({"role": "user", "content": f"approved={event.payload.get('approved')}"})
+    return messages
+
+
 def run_task_loop(task_id: int, session: Session, adapter: ModelAdapter, registry: ToolRegistry) -> None:
     task = session.get(Task, task_id)
-    messages = [{"role": "user", "content": task.description}]
+    messages = _build_initial_messages(session, task)
 
     while True:
         step = adapter.complete(messages, registry.specs())
