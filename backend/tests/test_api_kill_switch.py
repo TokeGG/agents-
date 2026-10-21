@@ -25,4 +25,16 @@ def test_kill_task_endpoint_interrupts_running_task(client):
 
     kill_response = client.post(f"/tasks/{task_id}/kill")
     assert kill_response.status_code == 200
-    assert kill_response.json()["id"] == task_id
+    body = kill_response.json()
+    assert body["id"] == task_id
+    assert body["status"] == "interrupted"
+
+    detail = client.get(f"/tasks/{task_id}").json()
+    assert detail["task"]["status"] == "interrupted"
+    gap_events = [e for e in detail["events"] if e["type"] == "report_gap"]
+    assert gap_events, "expected a report_gap event recording the kill"
+
+
+def test_kill_switch_rejects_invalid_mode(client):
+    response = client.post("/kill-switch", json={"mode": "not-a-real-mode"})
+    assert response.status_code == 422

@@ -167,4 +167,5 @@ async def kill_task(
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
     await scheduler.kill_task(task_id)
+    session.expire(task)
     return {"id": task.id, "status": task.status}

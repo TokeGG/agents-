@@ -152,6 +152,63 @@ async def test_kill_task_cascades_to_running_child(db_session, session_factory):
     assert db_session.get(Task, child_id).status == "interrupted"
 
 
+@pytest.mark.asyncio
+async def test_kill_task_cascades_to_running_grandchild(db_session, session_factory):
+    parent_id = make_queued_task(db_session)
+    child_id = make_queued_task(db_session)
+    grandchild_id = make_queued_task(db_session)
+    db_session.get(Task, parent_id).status = "running"
+    child_task = db_session.get(Task, child_id)
+    child_task.status = "running"
+    child_task.parent_task_id = parent_id
+    grandchild_task = db_session.get(Task, grandchild_id)
+    grandchild_task.status = "running"
+    grandchild_task.parent_task_id = child_id
+    db_session.commit()
+
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None):
+        interrupt_event.wait(timeout=5)
+        task = session.get(Task, task_id)
+        task.status = "interrupted"
+        session.commit()
+
+    scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=3, run_fn=fake_run)
+    for tid in (parent_id, child_id, grandchild_id):
+        scheduler._interrupt_events[tid] = threading.Event()
+        scheduler._running[tid] = asyncio.create_task(
+            asyncio.to_thread(
+                fake_run, tid, session_factory(), None, None, scheduler,
+                scheduler._interrupt_events[tid],
+            )
+        )
+
+    await scheduler.kill_task(parent_id)
+    await asyncio.sleep(0.2)
+
+    db_session.expire_all()
+    assert db_session.get(Task, parent_id).status == "interrupted"
+    assert db_session.get(Task, child_id).status == "interrupted"
+    assert db_session.get(Task, grandchild_id).status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_kill_task_interrupts_waiting_task_not_currently_running(db_session, session_factory):
+    """A task parked in a non-running "waiting" status (queued,
+    awaiting_answer, awaiting_approval, awaiting_subtask) has no entry in
+    _interrupt_events (nothing is running it right now), so kill_task must
+    mark it interrupted directly rather than silently doing nothing."""
+    tid = make_queued_task(db_session)
+    task = db_session.get(Task, tid)
+    task.status = "awaiting_answer"
+    db_session.commit()
+
+    scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=3)
+    await scheduler.kill_task(tid)
+
+    db_session.expire_all()
+    assert db_session.get(Task, tid).status == "interrupted"
+
+
 def test_urgent_task_is_popped_before_older_non_urgent_tasks(db_session, session_factory):
     scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=1)
     old1 = make_queued_task(db_session)

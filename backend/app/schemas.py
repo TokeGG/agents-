@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -25,4 +27,4 @@ class ApproveTaskRequest(BaseModel):
 
 
 class KillSwitchRequest(BaseModel):
-    mode: str
+    mode: Literal["normal", "pause", "stop"]

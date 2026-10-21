@@ -12,6 +12,13 @@ POLL_INTERVAL_SECONDS = 0.05
 # interrupt_event and finish, before giving up on them (best effort: the
 # underlying asyncio.to_thread worker thread cannot be forced to stop).
 STOP_DRAIN_TIMEOUT_SECONDS = 5.0
+# Statuses a task can be in while *not* actively running (nothing in
+# self._interrupt_events for it) but still "alive" in the sense that it will
+# run again later unless something stops it: sitting in the queue, or parked
+# waiting on a user answer/approval, or waiting on a delegated subtask.
+WAITING_STATUSES = {"queued", "awaiting_answer", "awaiting_approval", "awaiting_subtask"}
+KILL_REPORT_GAP_REASON = "task was killed"
+KILL_REPORT_GAP_OPTIONS = ["retry the task", "start a new task"]
 
 
 class Scheduler:
@@ -86,25 +93,33 @@ class Scheduler:
         """Sets the scheduler's mode. "pause" stops new tasks from being
         popped off the queue (in-flight tasks finish normally). "stop" does
         the same, and additionally signals every currently-running task's
-        interrupt_event so they wind down cooperatively. "normal" resumes
-        popping."""
+        interrupt_event and waits (bounded) for them to actually finish
+        draining, same as stop(). "normal" resumes popping."""
         self._mode = mode
         if mode == "stop":
-            self._collect_and_interrupt(list(self._interrupt_events.keys()))
+            await self._interrupt_and_wait(list(self._interrupt_events.keys()))
         return self.status()
 
     async def kill_task(self, task_id: int) -> None:
         """Interrupts task_id and every descendant task (walking
-        parent_task_id), for whichever of them are currently running (i.e.
-        present in self._interrupt_events). The loop's own cooperative check
-        (checked between steps in run_task_loop) does the rest: marks the
-        task "interrupted", writes a report_gap event, and returns."""
+        parent_task_id). For whichever of them are currently running (i.e.
+        present in self._interrupt_events), signals their interrupt_event and
+        waits (bounded) for the worker to actually finish — the loop's own
+        cooperative check (Task 3) marks the task "interrupted" and writes
+        the report_gap event. For ids that are *not* currently running but
+        are still "alive" (queued, or parked awaiting_answer/awaiting_approval/
+        awaiting_subtask), there is no running worker to interrupt, so this
+        marks them "interrupted" directly (and writes the same report_gap
+        event) here instead — otherwise killing a waiting task would be a
+        silent no-op, and answering/approving it later would just re-enqueue
+        and run it again."""
         session = self.session_factory()
         try:
             ids = self._collect_descendant_ids(session, task_id)
+            self._mark_waiting_tasks_interrupted(session, ids)
         finally:
             session.close()
-        self._collect_and_interrupt(ids)
+        await self._interrupt_and_wait(ids)
 
     def _collect_descendant_ids(self, session: Session, task_id: int) -> list[int]:
         ids = [task_id]
@@ -120,11 +135,44 @@ class Scheduler:
             ids.extend(frontier)
         return ids
 
-    def _collect_and_interrupt(self, ids) -> None:
+    def _mark_waiting_tasks_interrupted(self, session: Session, ids) -> None:
+        """For ids with no live interrupt_event (nothing currently running
+        them), directly interrupt any that are still queued or parked
+        waiting on the user/a subtask, under the same lock enqueue()/
+        _pop_next() use, so the scheduler can never pop one of these later."""
+        with self._lock:
+            for task_id in ids:
+                if task_id in self._interrupt_events:
+                    continue  # currently running; handled via interrupt_event + wait instead
+                task = session.get(Task, task_id)
+                if task is not None and task.status in WAITING_STATUSES:
+                    task.status = "interrupted"
+                    session.add(
+                        Event(
+                            task_id=task_id,
+                            type="report_gap",
+                            payload={
+                                "reason": KILL_REPORT_GAP_REASON,
+                                "options": KILL_REPORT_GAP_OPTIONS,
+                            },
+                        )
+                    )
+            session.commit()
+
+    async def _interrupt_and_wait(self, ids) -> None:
+        """Signals the interrupt_event of every id in `ids` that currently
+        has one (i.e. is actually running right now), then awaits those
+        workers' real completion, bounded by STOP_DRAIN_TIMEOUT_SECONDS —
+        the same pattern stop() uses, so the caller doesn't get back a
+        response claiming a task is still "running" when it was just told to
+        stop and is (or should shortly be) done."""
+        running = [self._running[tid] for tid in ids if tid in self._running]
         for task_id in ids:
             interrupt_event = self._interrupt_events.get(task_id)
             if interrupt_event is not None:
                 interrupt_event.set()
+        if running:
+            await asyncio.wait(running, timeout=STOP_DRAIN_TIMEOUT_SECONDS)
 
     async def _loop_forever(self) -> None:
         while True:
