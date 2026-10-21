@@ -5,7 +5,7 @@ from typing import Callable, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import Task
+from app.models import Event, Task
 
 POLL_INTERVAL_SECONDS = 0.05
 
@@ -53,6 +53,18 @@ class Scheduler:
             except asyncio.CancelledError:
                 pass
             self._loop_task = None
+        # Also tear down any in-flight task runs: otherwise they keep running
+        # in background threads (asyncio.to_thread) past this call, which in
+        # tests leaks a stale run into the next test's app/dependency state.
+        running = list(self._running.values())
+        for running_task in running:
+            running_task.cancel()
+        for running_task in running:
+            try:
+                await running_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._running.clear()
 
     async def _loop_forever(self) -> None:
         while True:
@@ -108,6 +120,26 @@ class Scheduler:
                 await self.run_fn(*args)
             else:
                 await asyncio.to_thread(self.run_fn, *args)
+        except Exception as exc:  # noqa: BLE001 - must never leave a task stuck "running" silently
+            session.rollback()
+            task = session.get(Task, task_id)
+            if task is not None:
+                session.add(
+                    Event(
+                        task_id=task_id,
+                        type="report_gap",
+                        payload={
+                            "reason": f"internal error while running the task: {exc}",
+                            "options": [
+                                "retry the task",
+                                "check the model/API configuration",
+                                "contact support with the task id",
+                            ],
+                        },
+                    )
+                )
+                task.status = "failed"
+                session.commit()
         finally:
             session.close()
             self._running.pop(task_id, None)

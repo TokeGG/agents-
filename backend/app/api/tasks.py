@@ -1,14 +1,13 @@
 import os
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.auth import require_auth
-from app.agent.loop import run_task_loop
 from app.agent.model_adapter import ModelAdapter, OpenAICompatAdapter
 from app.agent.tools import ToolRegistry, ask_user_tool, http_get_tool, report_gap_tool
-from app.db import get_session, get_session_factory
+from app.db import get_session
 from app.models import Event, Rating, Task
 from app.agent.tools import ToolContext
 from app.schemas import (
@@ -38,47 +37,20 @@ def get_registry() -> ToolRegistry:
     return registry
 
 
-def _run_loop_in_background(task_id: int, session_factory, adapter: ModelAdapter, registry: ToolRegistry) -> None:
-    session = session_factory()
-    try:
-        run_task_loop(task_id, session, adapter, registry)
-    except Exception as exc:  # noqa: BLE001 - must never leave a task stuck "running" silently
-        session.rollback()
-        task = session.get(Task, task_id)
-        if task is not None:
-            session.add(
-                Event(
-                    task_id=task_id,
-                    type="report_gap",
-                    payload={
-                        "reason": f"internal error while running the task: {exc}",
-                        "options": [
-                            "retry the task",
-                            "check the model/API configuration",
-                            "contact support with the task id",
-                        ],
-                    },
-                )
-            )
-            task.status = "failed"
-            session.commit()
-    finally:
-        session.close()
+def get_scheduler(request: Request):
+    return request.app.state.scheduler
 
 
 @router.post("/tasks", status_code=201, response_model=CreateTaskResponse)
 def create_task(
     body: CreateTaskRequest,
-    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
-    session_factory=Depends(get_session_factory),
-    adapter: ModelAdapter = Depends(get_adapter),
-    registry: ToolRegistry = Depends(get_registry),
+    scheduler=Depends(get_scheduler),
 ):
-    task = Task(description=body.description, status="running", full_auto=body.full_auto)
+    task = Task(description=body.description, status="queued", full_auto=body.full_auto)
     session.add(task)
     session.commit()
-    background_tasks.add_task(_run_loop_in_background, task.id, session_factory, adapter, registry)
+    scheduler.enqueue(session, task.id)
     return CreateTaskResponse(id=task.id, status=task.status)
 
 
@@ -116,11 +88,8 @@ def rate_task(task_id: int, body: RateTaskRequest, session: Session = Depends(ge
 def answer_task(
     task_id: int,
     body: AnswerTaskRequest,
-    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
-    session_factory=Depends(get_session_factory),
-    adapter: ModelAdapter = Depends(get_adapter),
-    registry: ToolRegistry = Depends(get_registry),
+    scheduler=Depends(get_scheduler),
 ):
     task = session.get(Task, task_id)
     if task is None:
@@ -128,9 +97,8 @@ def answer_task(
     if task.status != "awaiting_answer":
         raise HTTPException(status_code=409, detail="task is not awaiting an answer")
     session.add(Event(task_id=task_id, type="user_answer", payload={"answer": body.answer}))
-    task.status = "running"
     session.commit()
-    background_tasks.add_task(_run_loop_in_background, task_id, session_factory, adapter, registry)
+    scheduler.enqueue(session, task_id, front=True)
     return {"id": task.id, "status": task.status}
 
 
@@ -138,11 +106,9 @@ def answer_task(
 def approve_task(
     task_id: int,
     body: ApproveTaskRequest,
-    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
-    session_factory=Depends(get_session_factory),
-    adapter: ModelAdapter = Depends(get_adapter),
     registry: ToolRegistry = Depends(get_registry),
+    scheduler=Depends(get_scheduler),
 ):
     task = session.get(Task, task_id)
     if task is None:
@@ -186,7 +152,6 @@ def approve_task(
         )
 
     session.add(Event(task_id=task_id, type="approval_response", payload={"approved": body.approved}))
-    task.status = "running"
     session.commit()
-    background_tasks.add_task(_run_loop_in_background, task_id, session_factory, adapter, registry)
+    scheduler.enqueue(session, task_id, front=True)
     return {"id": task.id, "status": task.status}

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///:memory:")
 
 engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 def get_session() -> Generator[Session, None, None]:

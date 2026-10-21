@@ -130,7 +130,9 @@ def run_task_loop(
         if step["type"] == "final_answer":
             messages.append({"role": "assistant", "content": step.get("content", "")})
             task.status = "completed"
-            session.commit()
+            # Status and the reflection event are committed together (status
+            # is set but not yet committed here) so a concurrent reader never
+            # observes "completed" with the reflection event still missing.
             _add_event(
                 session,
                 task_id,

@@ -7,6 +7,15 @@ from sqlalchemy.pool import StaticPool
 from app.models import Base, Task
 
 
+def _shared_sqlite_engine():
+    """An in-memory SQLite engine on a single StaticPool connection, shared
+    between the request-handling thread(s) and the Scheduler's background
+    worker thread(s), so they see the same data."""
+    return create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+
+
 @pytest.fixture()
 def db_session(session_factory):
     session = session_factory()
@@ -35,11 +44,9 @@ def client(monkeypatch):
 
     monkeypatch.setenv("AUTH_TOKEN", TEST_AUTH_TOKEN)
 
-    engine = create_engine(
-        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
+    engine = _shared_sqlite_engine()
     Base.metadata.create_all(engine)
-    TestSessionLocal = sessionmaker(bind=engine)
+    TestSessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
     def override_get_session():
         session = TestSessionLocal()
@@ -75,11 +82,9 @@ def client(monkeypatch):
 
 @pytest.fixture()
 def session_factory():
-    engine = create_engine(
-        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
+    engine = _shared_sqlite_engine()
     Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)
+    return sessionmaker(bind=engine, expire_on_commit=False)
 
 
 @pytest.fixture()

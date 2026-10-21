@@ -1,13 +1,30 @@
+import time
+
 from app.agent.model_adapter import FakeModelAdapter
 from app.api import tasks as tasks_module
+
+
+def wait_for_status(client, task_id, *statuses, timeout=10.0):
+    """Polls GET /tasks/{id} until its status is one of `statuses` (the real
+    async Scheduler runs tasks on its own poll loop, not synchronously within
+    the request), returning the final status seen."""
+    deadline = time.monotonic() + timeout
+    status = None
+    while time.monotonic() < deadline:
+        status = client.get(f"/tasks/{task_id}").json()["task"]["status"]
+        if status in statuses:
+            return status
+        time.sleep(0.02)
+    return status
 
 
 def test_create_and_get_task(client):
     response = client.post("/tasks", json={"description": "say hello", "full_auto": False})
     assert response.status_code == 201
     body = response.json()
-    assert body["status"] in ("completed", "running")
+    assert body["status"] == "queued"
 
+    assert wait_for_status(client, body["id"], "completed") == "completed"
     get_response = client.get(f"/tasks/{body['id']}")
     assert get_response.status_code == 200
     assert get_response.json()["task"]["description"] == "say hello"
@@ -27,6 +44,7 @@ def test_rate_fails_when_task_not_completed(client):
 def test_rate_succeeds_when_task_completed(client):
     create_response = client.post("/tasks", json={"description": "say hello", "full_auto": False})
     task_id = create_response.json()["id"]
+    assert wait_for_status(client, task_id, "completed") == "completed"
 
     rate_response = client.post(f"/tasks/{task_id}/rate", json={"value": 1})
     assert rate_response.status_code == 201
@@ -38,14 +56,17 @@ def test_answer_resumes_task_to_completion(client):
     )
     create_response = client.post("/tasks", json={"description": "pick one", "full_auto": False})
     task_id = create_response.json()["id"]
-    assert client.get(f"/tasks/{task_id}").json()["task"]["status"] == "awaiting_answer"
+    status = wait_for_status(client, task_id, "awaiting_answer")
+    if status != "awaiting_answer":
+        print("DEBUG", client.get(f"/tasks/{task_id}").json())
+    assert status == "awaiting_answer"
 
     client.app.dependency_overrides[tasks_module.get_adapter] = lambda: FakeModelAdapter(
         script=[{"type": "final_answer", "content": "done"}]
     )
     answer_response = client.post(f"/tasks/{task_id}/answer", json={"answer": "option A"})
     assert answer_response.status_code == 201
-    assert client.get(f"/tasks/{task_id}").json()["task"]["status"] == "completed"
+    assert wait_for_status(client, task_id, "completed") == "completed"
 
 
 def test_answer_accepts_blank_string(client):
@@ -54,6 +75,7 @@ def test_answer_accepts_blank_string(client):
     )
     create_response = client.post("/tasks", json={"description": "pick one", "full_auto": False})
     task_id = create_response.json()["id"]
+    assert wait_for_status(client, task_id, "awaiting_answer") == "awaiting_answer"
 
     client.app.dependency_overrides[tasks_module.get_adapter] = lambda: FakeModelAdapter(
         script=[{"type": "final_answer", "content": "done"}]
@@ -87,7 +109,7 @@ def test_approve_denial_does_not_execute_tool_and_records_denial(client):
     )
     create_response = client.post("/tasks", json={"description": "email someone", "full_auto": False})
     task_id = create_response.json()["id"]
-    assert client.get(f"/tasks/{task_id}").json()["task"]["status"] == "awaiting_approval"
+    assert wait_for_status(client, task_id, "awaiting_approval") == "awaiting_approval"
 
     client.app.dependency_overrides[tasks_module.get_adapter] = lambda: FakeModelAdapter(
         script=[{"type": "final_answer", "content": "done"}]
@@ -95,6 +117,7 @@ def test_approve_denial_does_not_execute_tool_and_records_denial(client):
     approve_response = client.post(f"/tasks/{task_id}/approve", json={"approved": False})
     assert approve_response.status_code == 201
 
+    assert wait_for_status(client, task_id, "completed") == "completed"
     detail = client.get(f"/tasks/{task_id}").json()
     assert detail["task"]["status"] == "completed"
     denial_events = [e for e in detail["events"] if e["type"] == "approval_response"]
@@ -112,6 +135,7 @@ def test_create_task_marks_failed_when_adapter_raises(client):
     client.app.dependency_overrides[tasks_module.get_adapter] = raising_adapter
     create_response = client.post("/tasks", json={"description": "say hello", "full_auto": False})
     task_id = create_response.json()["id"]
+    assert wait_for_status(client, task_id, "failed") == "failed"
 
     detail = client.get(f"/tasks/{task_id}").json()
     assert detail["task"]["status"] == "failed"
@@ -138,3 +162,10 @@ def test_approve_returns_error_when_no_pending_approval_request(client):
 
     approve_response = client.post(f"/tasks/{task_id}/approve", json={"approved": True})
     assert approve_response.status_code == 409
+
+
+def test_create_task_runs_through_scheduler(client):
+    response = client.post("/tasks", json={"description": "say hello", "full_auto": False})
+    assert response.json()["status"] == "queued"
+    task_id = response.json()["id"]
+    assert wait_for_status(client, task_id, "completed") == "completed"
