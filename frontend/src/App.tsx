@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { createTask } from "./api";
 import { TaskView } from "./TaskView";
+import { Dashboard } from "./Dashboard";
 
 export function App() {
+  const [view, setView] = useState<"create" | "dashboard">("create");
   const [description, setDescription] = useState("");
   const [fullAuto, setFullAuto] = useState(false);
   const [taskIds, setTaskIds] = useState<number[]>([]);
@@ -15,8 +17,24 @@ export function App() {
     setDescription("");
   }
 
+  if (view === "dashboard") {
+    return (
+      <div>
+        <div style={{ padding: 8, background: "#1e1e1e" }}>
+          <button onClick={() => setView("create")}>New task</button>
+          <button disabled>Dashboard</button>
+        </div>
+        <Dashboard />
+      </div>
+    );
+  }
+
   return (
     <div>
+      <div>
+        <button disabled>New task</button>
+        <button onClick={() => setView("dashboard")}>Dashboard</button>
+      </div>
       <h1>Agent Core</h1>
 
       <div>

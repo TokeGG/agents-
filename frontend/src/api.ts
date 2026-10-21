@@ -5,6 +5,23 @@ export type TaskDetail = {
   events: { type: string; payload: Record<string, unknown> }[];
 };
 
+export type DashboardTask = {
+  id: number;
+  description: string;
+  status: string;
+  agent_type: string;
+  parent_task_id: number | null;
+  children: DashboardTask[];
+};
+
+export type DashboardResponse = {
+  kill_switch: { mode: "normal" | "pause" | "stop"; running?: number; cap?: number };
+  queued: DashboardTask[];
+  running: DashboardTask[];
+  needs_you: DashboardTask[];
+  done: DashboardTask[];
+};
+
 // Stub bearer-token auth (see backend/app/auth.py). Set at build time via
 // VITE_AUTH_TOKEN; full login (passkey/2FA) is deploy-time work, not here.
 function authToken(): string {
@@ -43,6 +60,19 @@ export function answerTask(id: number, answer: string): Promise<{ id: number; st
 
 export function approveTask(id: number, approved: boolean): Promise<{ id: number; status: string }> {
   return postJson(`/tasks/${id}/approve`, { approved });
+}
+
+export async function getDashboard(): Promise<DashboardResponse> {
+  const response = await fetch("/dashboard", { headers: authHeaders() });
+  return response.json();
+}
+
+export function setKillSwitch(mode: "normal" | "pause" | "stop"): Promise<{ mode: string }> {
+  return postJson("/kill-switch", { mode });
+}
+
+export function killTask(id: number): Promise<{ id: number; status: string }> {
+  return postJson(`/tasks/${id}/kill`, {});
 }
 
 export function streamTask(id: number, onEvent: (event: { type: string; payload: Record<string, unknown> }) => void): () => void {
