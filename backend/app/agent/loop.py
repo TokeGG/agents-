@@ -1,4 +1,5 @@
 import json
+import threading
 
 import httpx
 from sqlalchemy.orm import Session
@@ -11,6 +12,11 @@ from app.models import Event, Task
 UNKNOWN_TOOL_OPTIONS = [
     "register this tool via the connector forge (not yet built)",
     "rephrase the task to avoid it",
+]
+
+INTERRUPT_OPTIONS = [
+    "retry the task",
+    "it stopped partway — review its trace before retrying",
 ]
 
 MAX_STEP_LIMIT_OPTIONS = [
@@ -73,10 +79,19 @@ def _build_initial_messages(session: Session, task: Task) -> list[dict]:
     return messages
 
 
-def run_task_loop(task_id: int, session: Session, adapter: ModelAdapter, registry: ToolRegistry) -> None:
+def run_task_loop(
+    task_id: int,
+    session: Session,
+    adapter: ModelAdapter,
+    registry: ToolRegistry,
+    scheduler=None,
+    interrupt_event: threading.Event | None = None,
+) -> None:
     task = session.get(Task, task_id)
     messages = _build_initial_messages(session, task)
-    steps_taken = 0
+    # Persisted on the Task row so the count survives pause/resume across
+    # separate run_task_loop calls.
+    steps_taken = task.steps_taken
 
     while True:
         if steps_taken >= MAX_STEPS:
@@ -92,7 +107,22 @@ def run_task_loop(task_id: int, session: Session, adapter: ModelAdapter, registr
             task.status = "failed"
             session.commit()
             return
+        if interrupt_event is not None and interrupt_event.is_set():
+            _add_event(
+                session,
+                task_id,
+                "report_gap",
+                {
+                    "reason": "stopped by kill switch",
+                    "options": INTERRUPT_OPTIONS,
+                },
+            )
+            task.status = "interrupted"
+            session.commit()
+            return
         steps_taken += 1
+        task.steps_taken = steps_taken
+        session.commit()
 
         step = adapter.complete(messages, registry.specs())
         step_event = _add_event(session, task_id, "model_step", dict(step))

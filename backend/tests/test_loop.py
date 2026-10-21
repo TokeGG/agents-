@@ -1,3 +1,5 @@
+import threading
+
 import httpx
 
 from app.agent.loop import run_task_loop
@@ -111,3 +113,30 @@ def test_loop_fails_with_report_gap_when_step_limit_exceeded(db_session, task):
     gaps = db_session.query(Event).filter_by(task_id=task.id, type="report_gap").all()
     assert len(gaps) < 100
     assert any("maximum step limit" in g.payload["reason"] for g in gaps)
+
+
+def test_loop_stops_immediately_when_interrupt_event_already_set(db_session, task):
+    adapter = FakeModelAdapter(script=[{"type": "final_answer", "content": "should not run"}])
+    registry = ToolRegistry()
+    event = threading.Event()
+    event.set()
+    run_task_loop(task.id, db_session, adapter, registry, interrupt_event=event)
+    refreshed = db_session.get(Task, task.id)
+    assert refreshed.status == "interrupted"
+    gap = db_session.query(Event).filter_by(task_id=task.id, type="report_gap").one()
+    assert "stopped by kill switch" in gap.payload["reason"]
+
+
+def test_steps_taken_persists_across_resume(db_session, task):
+    adapter1 = FakeModelAdapter(script=[
+        {"type": "tool_call", "tool_name": "ask_user", "arguments": {"question": "q"}},
+    ])
+    registry = ToolRegistry()
+    registry.register(ask_user_tool)
+    run_task_loop(task.id, db_session, adapter1, registry)
+    after_first = db_session.get(Task, task.id).steps_taken
+    assert after_first == 1
+
+    adapter2 = FakeModelAdapter(script=[{"type": "final_answer", "content": "done"}])
+    run_task_loop(task.id, db_session, adapter2, registry)
+    assert db_session.get(Task, task.id).steps_taken == 2
