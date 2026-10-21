@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.dashboard import router as dashboard_router
 from app.api.events import router as events_router
 from app.api.kill_switch import router as kill_switch_router
 from app.api.tasks import get_adapter, get_registry, router as tasks_router
@@ -61,3 +62,4 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(tasks_router)
 app.include_router(events_router)
 app.include_router(kill_switch_router)
+app.include_router(dashboard_router)
