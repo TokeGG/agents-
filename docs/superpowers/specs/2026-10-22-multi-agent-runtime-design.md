@@ -116,6 +116,17 @@ requests can't race on recomputing `queue_position`.
 
 ## 6. Data Flow
 
+0. **Startup recovery:** on process start (FastAPI lifespan, before the
+   Scheduler begins popping the queue), scan for tasks left in
+   `"running"` or `"awaiting_subtask"` from a previous process
+   incarnation — a crash or restart kills the in-memory asyncio tasks
+   without updating their DB status, so these rows would otherwise sit
+   forever with nothing executing them. Each one is marked `"failed"`
+   with a `report_gap` event ("server restarted while this task was
+   running — its in-progress state could not be resumed safely"), options
+   `["retry the task", "review its trace for partial side effects before
+   retrying"]`. Tasks left in `"queued"` need no special handling — they
+   re-enter the queue normally since `queue_position` is persisted.
 1. `POST /tasks` creates the `Task` with `status="queued"`, computes
    `queue_position` (front if `urgent`, else back), and returns
    immediately. No `BackgroundTasks` call here anymore.
@@ -160,6 +171,9 @@ requests can't race on recomputing `queue_position`.
 - **Scheduler**: cap enforcement (a 4th task stays queued while 3 run),
   urgent-jumps-queue ordering, pause vs. stop kill-switch semantics,
   single-task kill.
+- **Startup recovery**: a task seeded directly into `"running"` (simulating
+  a crash) is found and marked `"failed"` with the restart `report_gap` on
+  the next process start, before the Scheduler resumes popping the queue.
 - **Delegation**: blocking parent releases its slot and resumes with the
   child's result; background parent continues immediately and later sees
   a `subtask_update`; a cap-exhausting fan-out of blocking parents still
