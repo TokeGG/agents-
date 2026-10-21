@@ -22,3 +22,7 @@ class AnswerTaskRequest(BaseModel):
 
 class ApproveTaskRequest(BaseModel):
     approved: bool
+
+
+class KillSwitchRequest(BaseModel):
+    mode: str

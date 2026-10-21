@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.events import router as events_router
+from app.api.kill_switch import router as kill_switch_router
 from app.api.tasks import get_adapter, get_registry, router as tasks_router
 from app.db import get_session_factory
 from app.models import Event, Task
@@ -59,3 +60,4 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(tasks_router)
 app.include_router(events_router)
+app.include_router(kill_switch_router)

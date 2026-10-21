@@ -155,3 +155,16 @@ def approve_task(
     session.commit()
     scheduler.enqueue(session, task_id, front=True)
     return {"id": task.id, "status": task.status}
+
+
+@router.post("/tasks/{task_id}/kill")
+async def kill_task(
+    task_id: int,
+    session: Session = Depends(get_session),
+    scheduler=Depends(get_scheduler),
+):
+    task = session.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    await scheduler.kill_task(task_id)
+    return {"id": task.id, "status": task.status}

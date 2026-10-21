@@ -44,6 +44,7 @@ class Scheduler:
         self._lock = threading.Lock()
         self._loop_task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
+        self._mode = "normal"
 
     async def start(self) -> None:
         self._stopped.clear()
@@ -78,10 +79,57 @@ class Scheduler:
         # honor the interrupt in time and is left running in the background
         # (best effort only - its thread cannot be forced to stop).
 
+    def status(self) -> dict:
+        return {"mode": self._mode, "running": len(self._running), "cap": self._cap}
+
+    async def kill_switch(self, mode: str) -> dict:
+        """Sets the scheduler's mode. "pause" stops new tasks from being
+        popped off the queue (in-flight tasks finish normally). "stop" does
+        the same, and additionally signals every currently-running task's
+        interrupt_event so they wind down cooperatively. "normal" resumes
+        popping."""
+        self._mode = mode
+        if mode == "stop":
+            self._collect_and_interrupt(list(self._interrupt_events.keys()))
+        return self.status()
+
+    async def kill_task(self, task_id: int) -> None:
+        """Interrupts task_id and every descendant task (walking
+        parent_task_id), for whichever of them are currently running (i.e.
+        present in self._interrupt_events). The loop's own cooperative check
+        (checked between steps in run_task_loop) does the rest: marks the
+        task "interrupted", writes a report_gap event, and returns."""
+        session = self.session_factory()
+        try:
+            ids = self._collect_descendant_ids(session, task_id)
+        finally:
+            session.close()
+        self._collect_and_interrupt(ids)
+
+    def _collect_descendant_ids(self, session: Session, task_id: int) -> list[int]:
+        ids = [task_id]
+        frontier = [task_id]
+        while frontier:
+            children = (
+                session.query(Task.id)
+                .filter(Task.parent_task_id.in_(frontier))
+                .all()
+            )
+            child_ids = [c.id for c in children]
+            frontier = [cid for cid in child_ids if cid not in ids]
+            ids.extend(frontier)
+        return ids
+
+    def _collect_and_interrupt(self, ids) -> None:
+        for task_id in ids:
+            interrupt_event = self._interrupt_events.get(task_id)
+            if interrupt_event is not None:
+                interrupt_event.set()
+
     async def _loop_forever(self) -> None:
         while True:
             try:
-                while len(self._running) < self._cap:
+                while self._mode == "normal" and len(self._running) < self._cap:
                     session = self.session_factory()
                     try:
                         task = self._pop_next(session)

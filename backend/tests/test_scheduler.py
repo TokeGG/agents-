@@ -81,6 +81,77 @@ async def test_stop_sets_interrupt_and_waits_for_worker_without_closing_its_sess
         check_session.close()
 
 
+@pytest.mark.asyncio
+async def test_pause_stops_new_starts_but_lets_running_finish(db_session, session_factory):
+    release = threading.Event()
+    started = []
+
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None):
+        started.append(task_id)
+        release.wait(timeout=5)
+        task = session.get(Task, task_id)
+        task.status = "completed"
+        session.commit()
+
+    scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=3, run_fn=fake_run)
+    await scheduler.start()
+    running_tid = make_queued_task(db_session)
+    scheduler.enqueue(db_session, running_tid)
+    await asyncio.sleep(0.05)
+    assert started == [running_tid]
+
+    await scheduler.kill_switch("pause")
+    tid = make_queued_task(db_session)
+    scheduler.enqueue(db_session, tid)
+    await asyncio.sleep(0.1)
+    assert db_session.get(Task, tid).status == "queued"  # never started
+    assert tid not in started
+
+    release.set()
+    await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_kill_task_cascades_to_running_child(db_session, session_factory):
+    parent_id = make_queued_task(db_session)
+    child_id = make_queued_task(db_session)
+    parent_task = db_session.get(Task, parent_id)
+    parent_task.status = "running"
+    child_task = db_session.get(Task, child_id)
+    child_task.status = "running"
+    child_task.parent_task_id = parent_id
+    db_session.commit()
+
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None):
+        interrupt_event.wait(timeout=5)
+        task = session.get(Task, task_id)
+        task.status = "interrupted"
+        session.commit()
+
+    scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=3, run_fn=fake_run)
+    scheduler._interrupt_events[parent_id] = threading.Event()
+    scheduler._interrupt_events[child_id] = threading.Event()
+    scheduler._running[parent_id] = asyncio.create_task(
+        asyncio.to_thread(
+            fake_run, parent_id, session_factory(), None, None, scheduler,
+            scheduler._interrupt_events[parent_id],
+        )
+    )
+    scheduler._running[child_id] = asyncio.create_task(
+        asyncio.to_thread(
+            fake_run, child_id, session_factory(), None, None, scheduler,
+            scheduler._interrupt_events[child_id],
+        )
+    )
+
+    await scheduler.kill_task(parent_id)
+    await asyncio.sleep(0.2)
+
+    db_session.expire_all()
+    assert db_session.get(Task, parent_id).status == "interrupted"
+    assert db_session.get(Task, child_id).status == "interrupted"
+
+
 def test_urgent_task_is_popped_before_older_non_urgent_tasks(db_session, session_factory):
     scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=1)
     old1 = make_queued_task(db_session)
