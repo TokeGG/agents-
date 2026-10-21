@@ -76,6 +76,18 @@ def _build_initial_messages(session: Session, task: Task) -> list[dict]:
             messages.append({"role": "user", "content": event.payload.get("answer", "")})
         elif event.type == "approval_response":
             messages.append({"role": "user", "content": f"approved={event.payload.get('approved')}"})
+        elif event.type == "subtask_update":
+            payload = event.payload
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": last_call_id,
+                    "content": (
+                        f"subtask {payload.get('subtask_id')} finished with status "
+                        f"'{payload.get('status')}': {payload.get('content')}"
+                    ),
+                }
+            )
     return messages
 
 

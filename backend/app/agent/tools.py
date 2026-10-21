@@ -116,8 +116,8 @@ report_gap_tool = _ReportGapTool()
 # may nest, and how many concurrently-alive (non-terminal) children a single
 # parent task may fan out to. Both guard against a model runaway-delegating
 # forever or spawning unbounded subtasks.
-MAX_DELEGATION_DEPTH = 3
-MAX_CHILDREN_PER_TASK = 5
+MAX_DELEGATION_DEPTH = 5
+MAX_CHILDREN_PER_TASK = 10
 
 TERMINAL_TASK_STATUSES = {"completed", "failed", "interrupted"}
 
@@ -192,6 +192,20 @@ class _DelegateTaskTool:
             delegation_depth=parent.delegation_depth + 1,
         )
         ctx.session.add(child)
+        # For a blocking delegation, the parent's status must already read
+        # "awaiting_subtask" in the DB *before* the child is enqueued (and so
+        # before it can possibly run and terminate). Otherwise there is a
+        # window where a fast child reaches a terminal state while the parent
+        # row still says "running" (the loop hasn't yet set
+        # "awaiting_subtask", which only happens after this tool call
+        # returns) -- Scheduler._on_task_terminal would then see a "running"
+        # parent, correctly decide there's nothing to wake, and the parent
+        # would commit "awaiting_subtask" moments later with no one left to
+        # ever re-enqueue it. Setting the status here, in the same commit as
+        # the child row, closes that window: by the time the child can
+        # possibly finish, the parent already reads "awaiting_subtask".
+        if arguments["mode"] == "blocking":
+            parent.status = "awaiting_subtask"
         ctx.session.commit()
         ctx.scheduler.enqueue(ctx.session, child.id)
         return {

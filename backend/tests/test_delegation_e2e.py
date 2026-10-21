@@ -40,30 +40,25 @@ async def test_blocking_parent_resumes_with_child_result(db_session, session_fac
         {"type": "final_answer", "content": "done"},
     ])
 
-    adapters = {parent_id: parent_adapter}
-
-    def adapter_factory():
-        # The scheduler calls this once per _run_one invocation, before it
-        # knows which task_id it's for, so route by inspecting which task_ids
-        # are still queued/running isn't available here. Instead we rely on
-        # a registry keyed by task_id populated lazily below.
-        return _RoutingAdapter(adapters, child_adapter)
-
     class _RoutingAdapter:
-        def __init__(self, adapters_by_id, fallback):
-            self._adapters_by_id = adapters_by_id
-            self._fallback = fallback
-            self._resolved = None
+        """The scheduler calls adapter_factory() once per _run_one invocation,
+        before it knows which task_id it's for, so dispatch by inspecting the
+        first (user) message's content, which is the task's description --
+        the only thing distinguishing "parent task" from a delegated child at
+        that point."""
+
+        def __init__(self, parent_adapter, fallback_adapter):
+            self._parent_adapter = parent_adapter
+            self._fallback = fallback_adapter
 
         def complete(self, messages, tools):
-            # Lazily resolve on first call using thread-local-ish state isn't
-            # straightforward without the task_id; instead we dispatch based
-            # on whether this is the first-ever user message, which contains
-            # the task description.
             description = messages[0]["content"]
             if description == "parent task":
-                return self._adapters_by_id[parent_id].complete(messages, tools)
+                return self._parent_adapter.complete(messages, tools)
             return self._fallback.complete(messages, tools)
+
+    def adapter_factory():
+        return _RoutingAdapter(parent_adapter, child_adapter)
 
     def registry_factory():
         registry = ToolRegistry()
@@ -89,8 +84,6 @@ async def test_blocking_parent_resumes_with_child_result(db_session, session_fac
     assert parent_task.status == "completed"
 
     parent_events = db_session.query(Event).filter_by(task_id=parent_id).order_by(Event.id).all()
-    subtask_update_events = [e for e in parent_events if e.type in ("tool_result", "subtask_update")]
-    assert any(
-        "child" in str(e.payload).lower() or "done" in str(e.payload).lower()
-        for e in subtask_update_events
-    )
+    subtask_update_events = [e for e in parent_events if e.type == "subtask_update"]
+    assert len(subtask_update_events) == 1
+    assert subtask_update_events[0].payload["status"] == "completed"

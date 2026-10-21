@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from app.models import Task
+from app.models import Event, Task
 from app.scheduler import Scheduler
 
 
@@ -207,6 +207,44 @@ async def test_kill_task_interrupts_waiting_task_not_currently_running(db_sessio
 
     db_session.expire_all()
     assert db_session.get(Task, tid).status == "interrupted"
+
+
+def test_on_task_terminal_does_nothing_when_parent_still_running(db_session, session_factory):
+    parent = Task(description="parent", status="running", full_auto=False)
+    db_session.add(parent)
+    db_session.commit()
+    child = Task(description="child", status="completed", parent_task_id=parent.id)
+    db_session.add(child)
+    db_session.commit()
+
+    scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=3)
+    scheduler._on_task_terminal(child.id)
+
+    db_session.expire_all()
+    refreshed_parent = db_session.get(Task, parent.id)
+    assert refreshed_parent.status == "running"
+    # still queue_position None -- not re-enqueued
+    assert refreshed_parent.queue_position is None
+    events = db_session.query(Event).filter_by(task_id=parent.id, type="subtask_update").all()
+    assert len(events) == 1
+    assert events[0].payload["status"] == "completed"
+
+
+def test_on_task_terminal_reenqueues_parent_awaiting_answer(db_session, session_factory):
+    parent = Task(description="parent", status="awaiting_answer", full_auto=False)
+    db_session.add(parent)
+    db_session.commit()
+    child = Task(description="child", status="completed", parent_task_id=parent.id)
+    db_session.add(child)
+    db_session.commit()
+
+    scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=3)
+    scheduler._on_task_terminal(child.id)
+
+    db_session.expire_all()
+    refreshed_parent = db_session.get(Task, parent.id)
+    assert refreshed_parent.status == "queued"
+    assert refreshed_parent.queue_position is not None
 
 
 def test_urgent_task_is_popped_before_older_non_urgent_tasks(db_session, session_factory):
