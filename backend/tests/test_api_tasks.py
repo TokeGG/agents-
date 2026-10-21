@@ -99,3 +99,42 @@ def test_approve_denial_does_not_execute_tool_and_records_denial(client):
     assert detail["task"]["status"] == "completed"
     denial_events = [e for e in detail["events"] if e["type"] == "approval_response"]
     assert denial_events[0]["payload"]["approved"] is False
+
+
+def test_create_task_marks_failed_when_adapter_raises(client):
+    def raising_adapter():
+        class _RaisingAdapter:
+            def complete(self, messages, tools):
+                raise RuntimeError("model API unreachable")
+
+        return _RaisingAdapter()
+
+    client.app.dependency_overrides[tasks_module.get_adapter] = raising_adapter
+    create_response = client.post("/tasks", json={"description": "say hello", "full_auto": False})
+    task_id = create_response.json()["id"]
+
+    detail = client.get(f"/tasks/{task_id}").json()
+    assert detail["task"]["status"] == "failed"
+    gap_events = [e for e in detail["events"] if e["type"] == "report_gap"]
+    assert gap_events, "expected a report_gap event recording the internal error"
+    assert "model API unreachable" in gap_events[0]["payload"]["reason"]
+
+
+def test_approve_returns_error_when_no_pending_approval_request(client):
+    create_response = client.post("/tasks", json={"description": "say hello", "full_auto": False})
+    task_id = create_response.json()["id"]  # this task completes immediately, never awaiting_approval
+
+    # Force the task into awaiting_approval without a approval_request event,
+    # to exercise the defensive guard directly.
+    from app.db import get_session as real_get_session
+
+    session_gen = client.app.dependency_overrides[real_get_session]()
+    session = next(session_gen)
+    from app.models import Task
+
+    task = session.get(Task, task_id)
+    task.status = "awaiting_approval"
+    session.commit()
+
+    approve_response = client.post(f"/tasks/{task_id}/approve", json={"approved": True})
+    assert approve_response.status_code == 409

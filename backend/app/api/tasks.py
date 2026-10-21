@@ -1,5 +1,6 @@
 import os
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -40,6 +41,26 @@ def _run_loop_in_background(task_id: int, session_factory, adapter: ModelAdapter
     session = session_factory()
     try:
         run_task_loop(task_id, session, adapter, registry)
+    except Exception as exc:  # noqa: BLE001 - must never leave a task stuck "running" silently
+        session.rollback()
+        task = session.get(Task, task_id)
+        if task is not None:
+            session.add(
+                Event(
+                    task_id=task_id,
+                    type="report_gap",
+                    payload={
+                        "reason": f"internal error while running the task: {exc}",
+                        "options": [
+                            "retry the task",
+                            "check the model/API configuration",
+                            "contact support with the task id",
+                        ],
+                    },
+                )
+            )
+            task.status = "failed"
+            session.commit()
     finally:
         session.close()
 
@@ -134,16 +155,25 @@ def approve_task(
         .order_by(Event.id.desc())
         .first()
     )
+    if pending is None:
+        raise HTTPException(status_code=409, detail="no pending approval request found for this task")
     tool_name = pending.payload["tool_name"]
     arguments = pending.payload["arguments"]
 
     if body.approved:
         tool = registry.get(tool_name)
-        ctx = ToolContext(task_id=task_id, session=session)
-        try:
-            result = tool.run(arguments, ctx)
-        except (KeyError, TypeError, ValueError) as exc:
-            result = {"ok": False, "output": f"tool call failed: {exc}", "data": None}
+        if tool is None:
+            result = {
+                "ok": False,
+                "output": f"tool '{tool_name}' is no longer registered",
+                "data": None,
+            }
+        else:
+            ctx = ToolContext(task_id=task_id, session=session)
+            try:
+                result = tool.run(arguments, ctx)
+            except (KeyError, TypeError, ValueError, httpx.HTTPError) as exc:
+                result = {"ok": False, "output": f"tool call failed: {exc}", "data": None}
         session.add(Event(task_id=task_id, type="tool_result", payload=result))
     else:
         session.add(

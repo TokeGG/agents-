@@ -2,7 +2,7 @@ import httpx
 
 from app.agent.loop import run_task_loop
 from app.agent.model_adapter import FakeModelAdapter
-from app.agent.tools import ToolRegistry, ask_user_tool, http_get_tool
+from app.agent.tools import ToolRegistry, ask_user_tool, http_get_tool, report_gap_tool
 from app.models import Event, Task
 
 
@@ -78,3 +78,36 @@ def test_loop_records_malformed_tool_call_and_continues(db_session, task, monkey
     assert refreshed.status == "completed"
     failed_result = db_session.query(Event).filter_by(task_id=task.id, type="tool_result").first()
     assert failed_result.payload["ok"] is False
+
+
+def test_loop_records_malformed_json_tool_call_and_continues(db_session, task):
+    """Review Focus: a model_step whose arguments failed JSON parsing (the
+    adapter's malformed_tool_call step) must not silently complete the task —
+    it is recorded as a failed observation and the loop continues."""
+    adapter = FakeModelAdapter(script=[
+        {"type": "malformed_tool_call", "raw": "{not valid json"},
+        {"type": "final_answer", "content": "done"},
+    ])
+    registry = ToolRegistry()
+    run_task_loop(task.id, db_session, adapter, registry)
+    refreshed = db_session.get(Task, task.id)
+    assert refreshed.status == "completed"
+    failed_result = db_session.query(Event).filter_by(task_id=task.id, type="tool_result").first()
+    assert failed_result.payload["ok"] is False
+    assert "not valid json" in failed_result.payload["output"]
+
+
+def test_loop_fails_with_report_gap_when_step_limit_exceeded(db_session, task):
+    """Review Focus: a model that keeps calling tools/report_gap forever must
+    not run unbounded — the loop enforces a max-step cap."""
+    adapter = FakeModelAdapter(script=[
+        {"type": "tool_call", "tool_name": "report_gap", "arguments": {"reason": "stuck", "options": ["x"]}}
+    ] * 100)
+    registry = ToolRegistry()
+    registry.register(report_gap_tool)
+    run_task_loop(task.id, db_session, adapter, registry)
+    refreshed = db_session.get(Task, task.id)
+    assert refreshed.status == "failed"
+    gaps = db_session.query(Event).filter_by(task_id=task.id, type="report_gap").all()
+    assert len(gaps) < 100
+    assert any("maximum step limit" in g.payload["reason"] for g in gaps)

@@ -15,7 +15,12 @@ class FinalAnswerStep(TypedDict):
     content: str
 
 
-ModelStep = ToolCallStep | FinalAnswerStep
+class MalformedToolCallStep(TypedDict):
+    type: str  # "malformed_tool_call"
+    raw: str
+
+
+ModelStep = ToolCallStep | FinalAnswerStep | MalformedToolCallStep
 
 
 class ModelAdapter(Protocol):
@@ -42,23 +47,25 @@ class OpenAICompatAdapter:
         self._model_name = model_name
 
     def complete(self, messages: list[dict], tools: list[dict]) -> ModelStep:
+        wire_tools = [{"type": "function", "function": tool} for tool in tools]
         response = httpx.post(
             f"{self._base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self._api_key}"},
-            json={"model": self._model_name, "messages": messages, "tools": tools},
+            json={"model": self._model_name, "messages": messages, "tools": wire_tools},
         )
         response.raise_for_status()
         message = response.json()["choices"][0]["message"]
 
         tool_calls = message.get("tool_calls")
         if not tool_calls:
-            return {"type": "final_answer", "content": message.get("content", "")}
+            return {"type": "final_answer", "content": message.get("content") or ""}
 
         call = tool_calls[0]["function"]
+        raw_arguments = call["arguments"]
         try:
-            arguments = json.loads(call["arguments"])
+            arguments = json.loads(raw_arguments)
         except (json.JSONDecodeError, TypeError):
-            return {"type": "final_answer", "content": message.get("content", "")}
+            return {"type": "malformed_tool_call", "raw": raw_arguments}
 
         return {"type": "tool_call", "tool_name": call["name"], "arguments": arguments}
 
