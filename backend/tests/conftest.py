@@ -8,11 +8,8 @@ from app.models import Base, Task
 
 
 @pytest.fixture()
-def db_session():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    session = Session()
+def db_session(session_factory):
+    session = session_factory()
     try:
         yield session
     finally:
@@ -74,6 +71,15 @@ def client(monkeypatch):
         yield test_client
 
     app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def session_factory():
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)
 
 
 @pytest.fixture()
