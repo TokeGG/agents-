@@ -8,7 +8,7 @@ from app.api.kill_switch import router as kill_switch_router
 from app.api.tasks import get_adapter, get_registry, router as tasks_router
 from app.db import get_session_factory
 from app.models import Event, Task
-from app.scheduler import Scheduler
+from app.scheduler import WAITING_STATUSES, Scheduler, collect_descendant_ids
 
 RESTART_REPORT_GAP_REASON = (
     "server restarted while this task was running — its in-progress state could not be resumed safely"
@@ -17,6 +17,10 @@ RESTART_REPORT_GAP_OPTIONS = [
     "retry the task",
     "review its trace for partial side effects before retrying",
 ]
+ORPHANED_DESCENDANT_REASON = (
+    "an ancestor task was lost in a server restart, so nothing is left to resume this subtask"
+)
+ORPHANED_DESCENDANT_OPTIONS = ["retry the top-level task", "start a new task"]
 
 
 def run_startup_recovery(session_factory) -> None:
@@ -39,6 +43,25 @@ def run_startup_recovery(session_factory) -> None:
                 )
             )
             task.status = "failed"
+        # Cascade: still-queued/waiting descendants of a now-failed task are
+        # orphaned (their parent will never resume them), so mark them
+        # "interrupted" rather than letting a queued child run for nothing or
+        # leaving a waiting grandchild in "needs you" forever.
+        for task in orphaned:
+            for tid in collect_descendant_ids(session, task.id)[1:]:
+                descendant = session.get(Task, tid)
+                if descendant is not None and descendant.status in WAITING_STATUSES:
+                    descendant.status = "interrupted"
+                    session.add(
+                        Event(
+                            task_id=tid,
+                            type="report_gap",
+                            payload={
+                                "reason": ORPHANED_DESCENDANT_REASON,
+                                "options": ORPHANED_DESCENDANT_OPTIONS,
+                            },
+                        )
+                    )
         session.commit()
     finally:
         session.close()

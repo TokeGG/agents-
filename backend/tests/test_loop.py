@@ -152,3 +152,79 @@ def test_steps_taken_persists_across_resume(db_session, task):
     adapter2 = FakeModelAdapter(script=[{"type": "final_answer", "content": "done"}])
     run_task_loop(task.id, db_session, adapter2, registry)
     assert db_session.get(Task, task.id).steps_taken == 2
+
+
+class _AskUserThatGetsKilledMidCall:
+    """ask_user whose run() lands a kill (interrupt_event.set()) while the
+    tool call is in flight -- after the top-of-loop interrupt check already
+    passed for this step, but before the loop sets awaiting_answer."""
+
+    name = "ask_user"
+    description = "ask"
+    parameters_schema = {"type": "object", "properties": {"question": {"type": "string"}}}
+
+    def __init__(self, interrupt_event):
+        self.interrupt_event = interrupt_event
+
+    def run(self, arguments, ctx):
+        result = ask_user_tool.run(arguments, ctx)
+        self.interrupt_event.set()
+        return result
+
+
+def test_kill_landing_during_ask_user_step_marks_interrupted_not_awaiting_answer(db_session, task):
+    event = threading.Event()
+    adapter = FakeModelAdapter(script=[
+        {"type": "tool_call", "tool_name": "ask_user", "arguments": {"question": "q"}},
+    ])
+    registry = ToolRegistry()
+    registry.register(_AskUserThatGetsKilledMidCall(event))
+    run_task_loop(task.id, db_session, adapter, registry, interrupt_event=event)
+    assert db_session.get(Task, task.id).status == "interrupted"
+    gap = db_session.query(Event).filter_by(task_id=task.id, type="report_gap").one()
+    assert "stopped by kill switch" in gap.payload["reason"]
+
+
+class _DelegateThatGetsKilledMidCall:
+    name = "delegate_task"
+    description = "delegate"
+    parameters_schema = {"type": "object", "properties": {}}
+
+    def __init__(self, interrupt_event):
+        self.interrupt_event = interrupt_event
+
+    def run(self, arguments, ctx):
+        result = delegate_task_tool.run(arguments, ctx)
+        self.interrupt_event.set()
+        return result
+
+
+def test_kill_landing_during_blocking_delegate_marks_interrupted_not_awaiting_subtask(db_session, task):
+    event = threading.Event()
+    adapter = FakeModelAdapter(script=[
+        {"type": "tool_call", "tool_name": "delegate_task", "arguments": {"description": "x", "mode": "blocking"}},
+    ])
+    registry = ToolRegistry()
+    registry.register(_DelegateThatGetsKilledMidCall(event))
+    run_task_loop(task.id, db_session, adapter, registry, scheduler=FakeSchedulerSpy(), interrupt_event=event)
+    assert db_session.get(Task, task.id).status == "interrupted"
+
+
+class _KillDuringStepAdapter:
+    """Lands the kill during the model step itself (after the top-of-loop
+    check passed), and that step's tool needs approval."""
+
+    def __init__(self, interrupt_event):
+        self.interrupt_event = interrupt_event
+
+    def complete(self, messages, specs):
+        self.interrupt_event.set()
+        return {"type": "tool_call", "tool_name": "send_email", "arguments": {}}
+
+
+def test_kill_landing_during_step_needing_approval_marks_interrupted(db_session, task):
+    event = threading.Event()
+    registry = ToolRegistry()
+    registry.register(_RaisingSendEmailTool())
+    run_task_loop(task.id, db_session, _KillDuringStepAdapter(event), registry, interrupt_event=event)
+    assert db_session.get(Task, task.id).status == "interrupted"

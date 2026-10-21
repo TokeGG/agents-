@@ -96,6 +96,29 @@ def _build_initial_messages(session: Session, task: Task) -> list[dict]:
     return messages
 
 
+def _interrupt_if_requested(session: Session, task: Task, interrupt_event) -> bool:
+    """If a kill has been signalled, marks the task "interrupted" (with the
+    kill-switch report_gap) and returns True. Called at the top of every step
+    and again right before every early-return pause point (ask_user,
+    awaiting_approval, blocking delegate_task): a kill landing while a step
+    is in flight would otherwise be silently dropped once the task parks in
+    a waiting status, since the top-of-loop check never runs again."""
+    if interrupt_event is None or not interrupt_event.is_set():
+        return False
+    _add_event(
+        session,
+        task.id,
+        "report_gap",
+        {
+            "reason": "stopped by kill switch",
+            "options": INTERRUPT_OPTIONS,
+        },
+    )
+    task.status = "interrupted"
+    session.commit()
+    return True
+
+
 def run_task_loop(
     task_id: int,
     session: Session,
@@ -124,18 +147,7 @@ def run_task_loop(
             task.status = "failed"
             session.commit()
             return
-        if interrupt_event is not None and interrupt_event.is_set():
-            _add_event(
-                session,
-                task_id,
-                "report_gap",
-                {
-                    "reason": "stopped by kill switch",
-                    "options": INTERRUPT_OPTIONS,
-                },
-            )
-            task.status = "interrupted"
-            session.commit()
+        if _interrupt_if_requested(session, task, interrupt_event):
             return
         steps_taken += 1
         task.steps_taken = steps_taken
@@ -190,6 +202,8 @@ def run_task_loop(
             return
 
         if tool_name not in ("ask_user", "report_gap") and needs_approval(tool_name, task):
+            if _interrupt_if_requested(session, task, interrupt_event):
+                return
             task.status = "awaiting_approval"
             _add_event(session, task_id, "approval_request", {"tool_name": tool_name, "arguments": arguments})
             return
@@ -204,11 +218,18 @@ def run_task_loop(
         messages.append({"role": "tool", "tool_call_id": call_id, "content": result["output"]})
 
         if tool_name == "ask_user" and result.get("ok"):
+            if _interrupt_if_requested(session, task, interrupt_event):
+                return
             task.status = "awaiting_answer"
             session.commit()
             return
 
         if tool_name == "delegate_task" and result.get("ok") and arguments.get("mode") == "blocking":
-            task.status = "awaiting_subtask"
-            session.commit()
+            if _interrupt_if_requested(session, task, interrupt_event):
+                return
+            # delegate_task itself already committed parent.status =
+            # "awaiting_subtask" (before enqueueing the child). Re-assigning
+            # and re-committing it here could clobber a "queued" status that
+            # _on_task_terminal set if the child already finished and woke
+            # this parent in between, so just return.
             return

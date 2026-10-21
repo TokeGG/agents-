@@ -21,6 +21,19 @@ KILL_REPORT_GAP_REASON = "task was killed"
 KILL_REPORT_GAP_OPTIONS = ["retry the task", "start a new task"]
 
 
+def collect_descendant_ids(session: Session, task_id: int) -> list[int]:
+    """Returns [task_id] plus the ids of every descendant (walking
+    parent_task_id), breadth-first."""
+    ids = [task_id]
+    frontier = [task_id]
+    while frontier:
+        children = session.query(Task.id).filter(Task.parent_task_id.in_(frontier)).all()
+        child_ids = [c.id for c in children]
+        frontier = [cid for cid in child_ids if cid not in ids]
+        ids.extend(frontier)
+    return ids
+
+
 class Scheduler:
     """Bounded-concurrency task scheduler with urgent-first queue ordering.
 
@@ -97,7 +110,12 @@ class Scheduler:
         draining, same as stop(). "normal" resumes popping."""
         self._mode = mode
         if mode == "stop":
-            await self._interrupt_and_wait(list(self._interrupt_events.keys()))
+            # Cascade exactly like kill_task does, applied to every task
+            # running right now: their whole subtrees, including queued/
+            # waiting descendants that have no interrupt_event of their own
+            # (otherwise a queued child of a stopped task would stay
+            # "queued" and run as an orphan once the mode returns to normal).
+            await self._kill_subtrees(list(self._interrupt_events.keys()))
         return self.status()
 
     async def kill_task(self, task_id: int) -> None:
@@ -113,27 +131,30 @@ class Scheduler:
         event) here instead — otherwise killing a waiting task would be a
         silent no-op, and answering/approving it later would just re-enqueue
         and run it again."""
-        session = self.session_factory()
-        try:
-            ids = self._collect_descendant_ids(session, task_id)
-            self._mark_waiting_tasks_interrupted(session, ids)
-        finally:
-            session.close()
-        await self._interrupt_and_wait(ids)
+        await self._kill_subtrees([task_id])
+
+    async def _kill_subtrees(self, root_ids) -> None:
+        """Interrupts every task in the subtrees rooted at root_ids (see
+        kill_task). Runs the collect -> mark-waiting -> interrupt-and-wait
+        sweep twice: a task being killed may be mid-delegate_task and create
+        a new child *after* the first descendant snapshot was taken, which
+        would otherwise escape the kill. The second sweep, after the running
+        workers have drained, re-collects and catches any such child."""
+        for _ in range(2):
+            session = self.session_factory()
+            try:
+                ids: list[int] = []
+                for root_id in root_ids:
+                    for tid in collect_descendant_ids(session, root_id):
+                        if tid not in ids:
+                            ids.append(tid)
+                self._mark_waiting_tasks_interrupted(session, ids)
+            finally:
+                session.close()
+            await self._interrupt_and_wait(ids)
 
     def _collect_descendant_ids(self, session: Session, task_id: int) -> list[int]:
-        ids = [task_id]
-        frontier = [task_id]
-        while frontier:
-            children = (
-                session.query(Task.id)
-                .filter(Task.parent_task_id.in_(frontier))
-                .all()
-            )
-            child_ids = [c.id for c in children]
-            frontier = [cid for cid in child_ids if cid not in ids]
-            ids.extend(frontier)
-        return ids
+        return collect_descendant_ids(session, task_id)
 
     def _mark_waiting_tasks_interrupted(self, session: Session, ids) -> None:
         """For ids with no live interrupt_event (nothing currently running
@@ -274,7 +295,12 @@ class Scheduler:
                         },
                     )
                 )
-                task.status = "failed"
+                # Only fail it if nothing else already moved it on (a kill
+                # marking it "interrupted", a delegation resume re-queueing
+                # it, ...) -- session.rollback() above expired the instance,
+                # so this reads the current committed status.
+                if task.status == "running":
+                    task.status = "failed"
                 session.commit()
         finally:
             session.close()

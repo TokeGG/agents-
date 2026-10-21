@@ -91,3 +91,43 @@ def test_dashboard_done_list_is_paginated(client):
 
     body = client.get("/dashboard").json()
     assert len(body["done"]) == 50
+
+
+def _all_top_level_ids(body):
+    return [t["id"] for bucket in ("queued", "running", "needs_you", "done") for t in body[bucket]]
+
+
+def test_dashboard_shows_awaiting_subtask_task_in_running(client):
+    session = _client_session(client)
+    try:
+        t = Task(description="waiting on child", status="awaiting_subtask", full_auto=False)
+        session.add(t)
+        session.commit()
+        tid = t.id
+    finally:
+        session.close()
+    body = client.get("/dashboard").json()
+    assert tid in [t["id"] for t in body["running"]]
+
+
+def test_dashboard_child_tasks_only_appear_nested_not_top_level(client):
+    session = _client_session(client)
+    try:
+        parent = Task(description="parent", status="running", full_auto=False)
+        session.add(parent)
+        session.commit()
+        kids = [
+            Task(description=f"child {s}", status=s, full_auto=False, parent_task_id=parent.id)
+            for s in ("queued", "running", "awaiting_answer")
+        ]
+        session.add_all(kids)
+        session.commit()
+        parent_id, kid_ids = parent.id, [k.id for k in kids]
+    finally:
+        session.close()
+    body = client.get("/dashboard").json()
+    top = _all_top_level_ids(body)
+    for kid in kid_ids:
+        assert kid not in top
+    parent_entry = next(t for t in body["running"] if t["id"] == parent_id)
+    assert sorted(c["id"] for c in parent_entry["children"]) == sorted(kid_ids)
