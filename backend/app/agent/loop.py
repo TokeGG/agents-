@@ -192,6 +192,16 @@ def _run_post_task_review(
             tool = registry.get(fix_step["tool_name"])
             if tool is None:
                 fix_summary = f"worker called unknown tool '{fix_step['tool_name']}'"
+            elif needs_approval(fix_step["tool_name"], task):
+                # Mirrors the main loop's approval gate, but this bounded,
+                # one-shot review pass must not pause the task for approval
+                # (that would reopen the review loop) -- so an irreversible
+                # tool that needs approval is simply skipped, and the skip is
+                # recorded, rather than run unchecked or silently dropped.
+                fix_summary = (
+                    f"worker's fix required tool '{fix_step['tool_name']}' which needs human "
+                    "approval — not executed in the bounded review pass"
+                )
             else:
                 ctx = ToolContext(
                     task_id=task.id, session=session, scheduler=scheduler, sandbox_manager=sandbox_manager

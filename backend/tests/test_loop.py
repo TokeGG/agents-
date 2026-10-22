@@ -357,6 +357,53 @@ def test_post_task_review_flags_problem_and_runs_fix_with_finding_visible(tmp_pa
     assert "http_get" in review_events[0].payload["fix_summary"]
 
 
+def test_post_task_review_skips_fix_tool_that_needs_approval(tmp_path, db_session, task):
+    """The fix step's tool call must go through the same approval gate as the
+    main loop -- an irreversible tool on a non-full-auto task must not be
+    executed just because it was returned by the bounded review's fix call."""
+    runtime = FakeContainerRuntime(base_dir=tmp_path)
+    manager = SandboxManager(runtime, session_factory=lambda: db_session, cap=2)
+    manager.get_or_create_container(task.id)
+    assert not task.full_auto
+
+    # Worker: final answer, then (when fixing) a tool call to an irreversible
+    # tool that needs_approval() would flag for a non-full-auto task.
+    worker = FakeModelAdapter(script=[
+        {"type": "final_answer", "content": "done"},
+        {"type": "tool_call", "tool_name": "send_email", "arguments": {}},
+    ])
+
+    class _FlaggingReviewer:
+        def complete(self, messages, tools):
+            return {
+                "type": "tool_call",
+                "tool_name": "report_gap",
+                "arguments": {"reason": "diff removes the test file", "options": []},
+            }
+
+    registry = ToolRegistry()
+    registry.register(_RaisingSendEmailTool())  # raises if actually run
+
+    run_task_loop(
+        task.id, db_session, worker, registry,
+        reviewer_adapter=_FlaggingReviewer(), sandbox_manager=manager,
+    )
+
+    task_row = db_session.get(Task, task.id)
+    # The task still completes -- the bounded review pass skips the
+    # unapproved tool rather than pausing for approval again.
+    assert task_row.status == "completed"
+    review_events = db_session.query(Event).filter_by(task_id=task.id, type="post_task_review").all()
+    assert len(review_events) == 1
+    assert review_events[0].payload["flagged"] is True
+    fix_summary = review_events[0].payload["fix_summary"]
+    assert "send_email" in fix_summary
+    assert "needs human approval" in fix_summary
+    assert "not executed" in fix_summary
+    # No tool_result event from send_email having run.
+    assert db_session.query(Event).filter_by(task_id=task.id, type="tool_result").count() == 0
+
+
 def test_post_task_review_errors_do_not_block_completion(db_session, task):
     worker = FakeModelAdapter(script=[{"type": "final_answer", "content": "done"}])
 
