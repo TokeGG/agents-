@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -355,3 +356,52 @@ async def test_run_one_exception_does_not_clobber_status_already_changed_elsewhe
 
     db_session.expire_all()
     assert db_session.get(Task, task_id).status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_run_one_tears_down_sandbox_only_on_terminal_status(db_session, session_factory):
+    teardown_calls = []
+    fake_sandbox = SimpleNamespace(teardown=lambda task_id: teardown_calls.append(task_id))
+
+    async def fake_run_completes(task_id, session, adapter, registry, scheduler=None, interrupt_event=None):
+        t = session.get(Task, task_id)
+        t.status = "completed"
+        session.commit()
+
+    scheduler = Scheduler(
+        session_factory, lambda: None, lambda: None, cap=1, run_fn=fake_run_completes, sandbox_manager=fake_sandbox
+    )
+    task_id = make_queued_task(session_factory())
+    await scheduler._run_one(task_id, threading.Event())
+    assert teardown_calls == [task_id]
+
+
+@pytest.mark.asyncio
+async def test_run_one_does_not_tear_down_sandbox_on_pause(db_session, session_factory):
+    teardown_calls = []
+    fake_sandbox = SimpleNamespace(teardown=lambda task_id: teardown_calls.append(task_id))
+
+    async def fake_run_pauses(task_id, session, adapter, registry, scheduler=None, interrupt_event=None):
+        t = session.get(Task, task_id)
+        t.status = "awaiting_answer"
+        session.commit()
+
+    scheduler = Scheduler(
+        session_factory, lambda: None, lambda: None, cap=1, run_fn=fake_run_pauses, sandbox_manager=fake_sandbox
+    )
+    task_id = make_queued_task(session_factory())
+    await scheduler._run_one(task_id, threading.Event())
+    assert teardown_calls == []
+
+
+def test_mark_waiting_tasks_interrupted_covers_awaiting_sandbox_slot(db_session, session_factory):
+    tid = make_queued_task(db_session)
+    task = db_session.get(Task, tid)
+    task.status = "awaiting_sandbox_slot"
+    db_session.commit()
+
+    scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=3)
+    scheduler._mark_waiting_tasks_interrupted(db_session, [tid])
+
+    db_session.expire_all()
+    assert db_session.get(Task, tid).status == "interrupted"

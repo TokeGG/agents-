@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -65,9 +67,19 @@ def client(monkeypatch):
         registry.register(report_gap_tool)
         return registry
 
+    def override_get_sandbox_manager(session_factory):
+        import tempfile
+
+        from app.sandbox.manager import SandboxManager
+        from app.sandbox.runtime import FakeContainerRuntime
+
+        base_dir = Path(tempfile.mkdtemp(prefix="sandbox-test-"))
+        return SandboxManager(FakeContainerRuntime(base_dir), session_factory=session_factory)
+
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_session_factory] = override_get_session_factory
     app.dependency_overrides[tasks_module.get_registry] = override_get_registry
+    app.dependency_overrides[tasks_module.get_sandbox_manager] = override_get_sandbox_manager
     # Default adapter: immediately finishes. Tests override this per-case via
     # app.dependency_overrides[tasks_module.get_adapter] for other scripts.
     app.dependency_overrides[tasks_module.get_adapter] = lambda: FakeModelAdapter(

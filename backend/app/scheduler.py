@@ -16,7 +16,14 @@ STOP_DRAIN_TIMEOUT_SECONDS = 5.0
 # self._interrupt_events for it) but still "alive" in the sense that it will
 # run again later unless something stops it: sitting in the queue, or parked
 # waiting on a user answer/approval, or waiting on a delegated subtask.
-WAITING_STATUSES = {"queued", "awaiting_answer", "awaiting_approval", "awaiting_subtask"}
+WAITING_STATUSES = {
+    "queued",
+    "awaiting_answer",
+    "awaiting_approval",
+    "awaiting_subtask",
+    "awaiting_sandbox_slot",
+}
+TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
 KILL_REPORT_GAP_REASON = "task was killed"
 KILL_REPORT_GAP_OPTIONS = ["retry the task", "start a new task"]
 
@@ -48,11 +55,13 @@ class Scheduler:
         registry_factory: Callable,
         cap: int = 3,
         run_fn: Optional[Callable] = None,
+        sandbox_manager=None,
     ):
         self.session_factory = session_factory
         self.adapter_factory = adapter_factory
         self.registry_factory = registry_factory
         self._cap = cap
+        self.sandbox_manager = sandbox_manager
         if run_fn is None:
             from app.agent.loop import run_task_loop
 
@@ -306,6 +315,19 @@ class Scheduler:
             session.close()
             self._running.pop(task_id, None)
             self._interrupt_events.pop(task_id, None)
+            if self.sandbox_manager is not None:
+                # `session` above has already been closed by the line just
+                # before this; reading Task.status off it would be stale or
+                # raise. Open a fresh session for this check, same pattern
+                # _on_task_terminal uses right after for its own lookup.
+                status_session = self.session_factory()
+                try:
+                    status_task = status_session.get(Task, task_id)
+                    is_terminal = status_task is not None and status_task.status in TERMINAL_STATUSES
+                finally:
+                    status_session.close()
+                if is_terminal:
+                    self.sandbox_manager.teardown(task_id)
             self._on_task_terminal(task_id)
 
     def _on_task_terminal(self, task_id: int) -> None:

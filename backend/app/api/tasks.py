@@ -11,12 +11,18 @@ from app.agent.tools import (
     ask_user_tool,
     check_subtask_tool,
     delegate_task_tool,
+    edit_file_tool,
     http_get_tool,
+    read_file_tool,
     report_gap_tool,
+    run_shell_tool,
+    write_file_tool,
 )
 from app.db import get_session
 from app.models import Event, Rating, Task
 from app.agent.tools import ToolContext
+from app.sandbox.manager import SandboxManager
+from app.sandbox.runtime import DockerContainerRuntime
 from app.schemas import (
     AnswerTaskRequest,
     ApproveTaskRequest,
@@ -43,7 +49,19 @@ def get_registry() -> ToolRegistry:
     registry.register(report_gap_tool)
     registry.register(delegate_task_tool)
     registry.register(check_subtask_tool)
+    registry.register(run_shell_tool)
+    registry.register(read_file_tool)
+    registry.register(write_file_tool)
+    registry.register(edit_file_tool)
     return registry
+
+
+def get_sandbox_manager(session_factory) -> SandboxManager:
+    """Real (non-test) SandboxManager, backed by Docker. Built lazily by
+    callers (lifespan wiring) so tests can override this via
+    app.dependency_overrides with a fake, same lazy-override pattern as
+    get_adapter/get_registry."""
+    return SandboxManager(DockerContainerRuntime(), session_factory=session_factory)
 
 
 def get_scheduler(request: Request):
@@ -145,7 +163,12 @@ def approve_task(
                 "data": None,
             }
         else:
-            ctx = ToolContext(task_id=task_id, session=session, scheduler=scheduler)
+            ctx = ToolContext(
+                task_id=task_id,
+                session=session,
+                scheduler=scheduler,
+                sandbox_manager=getattr(scheduler, "sandbox_manager", None),
+            )
             try:
                 result = tool.run(arguments, ctx)
             except (KeyError, TypeError, ValueError, httpx.HTTPError) as exc:

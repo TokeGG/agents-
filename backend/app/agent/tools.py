@@ -80,6 +80,8 @@ class _RunShellTool:
     }
 
     def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        if ctx.sandbox_manager is None:
+            return _NO_SANDBOX_RESULT
         return ctx.sandbox_manager.run_shell(ctx.task_id, arguments["command"])
 
 
@@ -96,6 +98,8 @@ class _ReadFileTool:
     }
 
     def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        if ctx.sandbox_manager is None:
+            return _NO_SANDBOX_RESULT
         return ctx.sandbox_manager.read_file(ctx.task_id, arguments["path"])
 
 
@@ -112,10 +116,19 @@ class _WriteFileTool:
     }
 
     def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        if ctx.sandbox_manager is None:
+            return _NO_SANDBOX_RESULT
         return ctx.sandbox_manager.write_file(ctx.task_id, arguments["path"], arguments["content"])
 
 
 write_file_tool = _WriteFileTool()
+
+
+_NO_SANDBOX_RESULT = {
+    "ok": False,
+    "output": "sandboxed execution is not available for this task",
+    "data": None,
+}
 
 
 class _EditFileTool:
@@ -132,6 +145,8 @@ class _EditFileTool:
     }
 
     def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        if ctx.sandbox_manager is None:
+            return _NO_SANDBOX_RESULT
         return ctx.sandbox_manager.edit_file(
             ctx.task_id, arguments["path"], arguments["old"], arguments["new"]
         )

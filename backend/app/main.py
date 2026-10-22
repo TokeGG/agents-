@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from app.api.dashboard import router as dashboard_router
 from app.api.events import router as events_router
 from app.api.kill_switch import router as kill_switch_router
-from app.api.tasks import get_adapter, get_registry, router as tasks_router
+from app.api.tasks import get_adapter, get_registry, get_sandbox_manager, router as tasks_router
 from app.db import get_session_factory
 from app.models import Event, Task
 from app.scheduler import WAITING_STATUSES, Scheduler, collect_descendant_ids
@@ -69,11 +69,15 @@ def run_startup_recovery(session_factory) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    session_factory = lambda: app.dependency_overrides.get(get_session_factory, get_session_factory)()()
+    sandbox_manager = app.dependency_overrides.get(get_sandbox_manager, get_sandbox_manager)(session_factory)
     scheduler = Scheduler(
-        session_factory=lambda: app.dependency_overrides.get(get_session_factory, get_session_factory)()(),
+        session_factory=session_factory,
         adapter_factory=lambda: app.dependency_overrides.get(get_adapter, get_adapter)(),
         registry_factory=lambda: app.dependency_overrides.get(get_registry, get_registry)(),
+        sandbox_manager=sandbox_manager,
     )
+    sandbox_manager.scheduler = scheduler
     app.state.scheduler = scheduler
     run_startup_recovery(scheduler.session_factory)
     await scheduler.start()
