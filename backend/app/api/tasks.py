@@ -42,6 +42,19 @@ def get_adapter() -> ModelAdapter:
     )
 
 
+def get_reviewer_adapter() -> ModelAdapter:
+    """Same shape as get_adapter(), but for the (optional) stronger reviewer
+    tier model_tiering escalates to. Falls back to the worker adapter's env
+    vars when the REVIEWER_* ones are unset, so an operator who hasn't
+    configured a separate reviewer model gets the additive-cost-free default
+    (worker == reviewer) instead of a crash."""
+    return OpenAICompatAdapter(
+        base_url=os.environ.get("REVIEWER_MODEL_API_BASE", os.environ.get("MODEL_API_BASE", "")),
+        api_key=os.environ.get("REVIEWER_MODEL_API_KEY", os.environ.get("MODEL_API_KEY", "")),
+        model_name=os.environ.get("REVIEWER_MODEL_NAME", os.environ.get("MODEL_NAME", "default")),
+    )
+
+
 def get_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(http_get_tool)

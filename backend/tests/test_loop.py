@@ -247,3 +247,23 @@ def test_kill_landing_during_step_needing_approval_marks_interrupted(db_session,
     registry.register(_RaisingSendEmailTool())
     run_task_loop(task.id, db_session, _KillDuringStepAdapter(event), registry, interrupt_event=event)
     assert db_session.get(Task, task.id).status == "interrupted"
+
+
+class _AlwaysFailsTool:
+    name = "run_shell"
+    description = "x"
+    parameters_schema = {"type": "object", "properties": {}}
+
+    def run(self, arguments, ctx):
+        raise ValueError("same error every time")
+
+
+def test_loop_escalates_to_reviewer_after_repeated_failures(db_session, task):
+    worker = FakeModelAdapter(script=[
+        {"type": "tool_call", "tool_name": "run_shell", "arguments": {}},
+    ] * 3)
+    reviewer = FakeModelAdapter(script=[{"type": "final_answer", "content": "giving up"}])
+    registry = ToolRegistry()
+    registry.register(_AlwaysFailsTool())
+    run_task_loop(task.id, db_session, worker, registry, reviewer_adapter=reviewer)
+    assert db_session.get(Task, task.id).status == "completed"  # reviewer's final_answer was used

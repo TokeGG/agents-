@@ -59,10 +59,18 @@ class Scheduler:
         cap: int = 3,
         run_fn: Optional[Callable] = None,
         sandbox_manager=None,
+        reviewer_adapter_factory: Optional[Callable] = None,
     ):
         self.session_factory = session_factory
+        # The *worker* model factory (cheap/default tier). Named adapter_factory
+        # for backward compatibility; see reviewer_adapter_factory below.
         self.adapter_factory = adapter_factory
         self.registry_factory = registry_factory
+        # Builds the reviewer (escalation-tier) adapter run_task_loop falls
+        # back to when a task gets stuck. Defaults to the worker factory so a
+        # Scheduler built without configuring a separate reviewer model still
+        # works (no distinct reviewer tier, zero additive cost).
+        self.reviewer_adapter_factory = reviewer_adapter_factory or adapter_factory
         self._cap = cap
         self.sandbox_manager = sandbox_manager
         if run_fn is None:
@@ -286,9 +294,18 @@ class Scheduler:
             if asyncio.iscoroutinefunction(self.run_fn):
                 # Test doubles may be async; real run_fn (run_task_loop) is
                 # sync and blocking, so it runs in a worker thread below.
-                await self.run_fn(*args, sandbox_manager=self.sandbox_manager)
+                await self.run_fn(
+                    *args,
+                    sandbox_manager=self.sandbox_manager,
+                    reviewer_adapter=self.reviewer_adapter_factory(),
+                )
             else:
-                await asyncio.to_thread(self.run_fn, *args, sandbox_manager=self.sandbox_manager)
+                await asyncio.to_thread(
+                    self.run_fn,
+                    *args,
+                    sandbox_manager=self.sandbox_manager,
+                    reviewer_adapter=self.reviewer_adapter_factory(),
+                )
         except Exception as exc:  # noqa: BLE001 - must never leave a task stuck "running" silently
             session.rollback()
             task = session.get(Task, task_id)

@@ -19,7 +19,7 @@ def make_queued_task(session, urgent=False):
 async def test_cap_enforced_and_fourth_task_waits(db_session, session_factory):
     started = []
 
-    async def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    async def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         started.append(task_id)
         await asyncio.sleep(0.05)
         task = session.get(Task, task_id)
@@ -50,7 +50,7 @@ async def test_stop_sets_interrupt_and_waits_for_worker_without_closing_its_sess
     observed_interrupt = threading.Event()
     session_was_still_open = threading.Event()
 
-    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         # Block (in a real OS thread, like the real run_fn does) until stop()
         # signals us, then keep using the session for a bit afterward.
         interrupt_event.wait(timeout=5)
@@ -87,7 +87,7 @@ async def test_pause_stops_new_starts_but_lets_running_finish(db_session, sessio
     release = threading.Event()
     started = []
 
-    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         started.append(task_id)
         release.wait(timeout=5)
         task = session.get(Task, task_id)
@@ -123,7 +123,7 @@ async def test_kill_task_cascades_to_running_child(db_session, session_factory):
     child_task.parent_task_id = parent_id
     db_session.commit()
 
-    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         interrupt_event.wait(timeout=5)
         task = session.get(Task, task_id)
         task.status = "interrupted"
@@ -167,7 +167,7 @@ async def test_kill_task_cascades_to_running_grandchild(db_session, session_fact
     grandchild_task.parent_task_id = child_id
     db_session.commit()
 
-    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         interrupt_event.wait(timeout=5)
         task = session.get(Task, task_id)
         task.status = "interrupted"
@@ -282,7 +282,7 @@ async def test_kill_switch_stop_cascades_to_queued_child_of_running_task(db_sess
     db_session.get(Task, child_id).parent_task_id = parent_id
     db_session.commit()
 
-    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         interrupt_event.wait(timeout=5)
         task = session.get(Task, task_id)
         task.status = "interrupted"
@@ -315,7 +315,7 @@ async def test_kill_task_catches_child_created_after_descendant_snapshot(db_sess
     db_session.commit()
     created = {}
 
-    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         interrupt_event.wait(timeout=5)
         child = Task(description="late child", status="queued", full_auto=False, parent_task_id=task_id)
         session.add(child)
@@ -344,7 +344,7 @@ async def test_run_one_exception_does_not_clobber_status_already_changed_elsewhe
     db_session.get(Task, task_id).status = "running"
     db_session.commit()
 
-    async def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    async def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         other = session_factory()
         other.get(Task, task_id).status = "interrupted"
         other.commit()
@@ -363,7 +363,7 @@ async def test_run_one_tears_down_sandbox_only_on_terminal_status(db_session, se
     teardown_calls = []
     fake_sandbox = SimpleNamespace(teardown=lambda task_id: teardown_calls.append(task_id))
 
-    async def fake_run_completes(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    async def fake_run_completes(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         t = session.get(Task, task_id)
         t.status = "completed"
         session.commit()
@@ -381,7 +381,7 @@ async def test_run_one_does_not_tear_down_sandbox_on_pause(db_session, session_f
     teardown_calls = []
     fake_sandbox = SimpleNamespace(teardown=lambda task_id: teardown_calls.append(task_id))
 
-    async def fake_run_pauses(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    async def fake_run_pauses(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         t = session.get(Task, task_id)
         t.status = "awaiting_answer"
         session.commit()
@@ -403,7 +403,7 @@ async def test_run_one_forwards_configured_sandbox_manager_to_run_fn(db_session,
     fake_sandbox = SimpleNamespace(teardown=lambda task_id: None)
     seen = {}
 
-    async def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    async def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         seen["sandbox_manager"] = sandbox_manager
         t = session.get(Task, task_id)
         t.status = "completed"
@@ -430,7 +430,7 @@ async def test_run_one_still_calls_on_task_terminal_when_teardown_raises(db_sess
 
     fake_sandbox = SimpleNamespace(teardown=raising_teardown)
 
-    async def fake_run_completes(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+    async def fake_run_completes(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
         t = session.get(Task, task_id)
         t.status = "completed"
         session.commit()
@@ -454,6 +454,33 @@ async def test_run_one_still_calls_on_task_terminal_when_teardown_raises(db_sess
     refreshed_parent = db_session.get(Task, parent.id)
     assert refreshed_parent.status == "queued"
     assert refreshed_parent.queue_position is not None
+
+
+@pytest.mark.asyncio
+async def test_run_one_forwards_reviewer_adapter_from_its_own_factory(db_session, session_factory):
+    """_run_one must call reviewer_adapter_factory (not just adapter_factory)
+    and pass its result through to run_fn as reviewer_adapter, so model
+    tiering actually has a distinct reviewer in production."""
+    reviewer_sentinel = object()
+    seen = {}
+
+    async def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None):
+        seen["reviewer_adapter"] = reviewer_adapter
+        t = session.get(Task, task_id)
+        t.status = "completed"
+        session.commit()
+
+    scheduler = Scheduler(
+        session_factory,
+        lambda: None,
+        lambda: None,
+        cap=1,
+        run_fn=fake_run,
+        reviewer_adapter_factory=lambda: reviewer_sentinel,
+    )
+    task_id = make_queued_task(session_factory())
+    await scheduler._run_one(task_id, threading.Event())
+    assert seen["reviewer_adapter"] is reviewer_sentinel
 
 
 def test_mark_waiting_tasks_interrupted_covers_awaiting_sandbox_slot(db_session, session_factory):

@@ -5,6 +5,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.agent.model_adapter import ModelAdapter
+from app.agent.model_tiering import ToolFailureTracker
 from app.agent.permissions import needs_approval
 from app.agent.tools import ToolContext, ToolRegistry
 from app.models import Event, Task
@@ -123,17 +124,25 @@ def _interrupt_if_requested(session: Session, task: Task, interrupt_event) -> bo
 def run_task_loop(
     task_id: int,
     session: Session,
-    adapter: ModelAdapter,
+    worker_adapter: ModelAdapter,
     registry: ToolRegistry,
     scheduler=None,
     interrupt_event: threading.Event | None = None,
     sandbox_manager=None,
+    reviewer_adapter: ModelAdapter | None = None,
 ) -> None:
+    if reviewer_adapter is None:
+        reviewer_adapter = worker_adapter
     task = session.get(Task, task_id)
     messages = _build_initial_messages(session, task)
     # Persisted on the Task row so the count survives pause/resume across
     # separate run_task_loop calls.
     steps_taken = task.steps_taken
+    # Scoped to this single run_task_loop call: NOT persisted across
+    # pause/resume. A resumed task (answer/approve) gets a fresh tracker and
+    # starts clean rather than replaying history to re-derive a failure
+    # count -- see model_tiering.py's module docstring for the rationale.
+    tool_failure_tracker = ToolFailureTracker()
 
     while True:
         if steps_taken >= MAX_STEPS:
@@ -155,6 +164,7 @@ def run_task_loop(
         task.steps_taken = steps_taken
         session.commit()
 
+        adapter = reviewer_adapter if tool_failure_tracker.should_escalate() else worker_adapter
         step = adapter.complete(messages, registry.specs())
         step_event = _add_event(session, task_id, "model_step", dict(step))
 
@@ -221,6 +231,7 @@ def run_task_loop(
             return
         except (KeyError, TypeError, ValueError, httpx.HTTPError) as exc:
             result = {"ok": False, "output": f"tool call failed: {exc}", "data": None}
+            tool_failure_tracker.record(tool_name, str(exc))
 
         _add_event(session, task_id, "tool_result", result)
         messages.append({"role": "tool", "tool_call_id": call_id, "content": result["output"]})

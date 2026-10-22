@@ -6,7 +6,13 @@ from fastapi import FastAPI
 from app.api.dashboard import router as dashboard_router
 from app.api.events import router as events_router
 from app.api.kill_switch import router as kill_switch_router
-from app.api.tasks import get_adapter, get_registry, get_sandbox_manager, router as tasks_router
+from app.api.tasks import (
+    get_adapter,
+    get_registry,
+    get_reviewer_adapter,
+    get_sandbox_manager,
+    router as tasks_router,
+)
 from app.db import get_session_factory
 from app.models import Event, Task
 from app.scheduler import WAITING_STATUSES, Scheduler, collect_descendant_ids
@@ -90,6 +96,9 @@ async def lifespan(app: FastAPI):
         session_factory=session_factory,
         adapter_factory=lambda: app.dependency_overrides.get(get_adapter, get_adapter)(),
         registry_factory=lambda: app.dependency_overrides.get(get_registry, get_registry)(),
+        reviewer_adapter_factory=lambda: app.dependency_overrides.get(
+            get_reviewer_adapter, get_reviewer_adapter
+        )(),
         sandbox_manager=sandbox_manager,
     )
     sandbox_manager.scheduler = scheduler
