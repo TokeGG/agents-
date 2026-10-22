@@ -417,6 +417,45 @@ async def test_run_one_forwards_configured_sandbox_manager_to_run_fn(db_session,
     assert seen["sandbox_manager"] is fake_sandbox
 
 
+@pytest.mark.asyncio
+async def test_run_one_still_calls_on_task_terminal_when_teardown_raises(db_session, session_factory):
+    """If sandbox_manager.teardown() blows up (e.g. Docker daemon down, or
+    the container was already removed), _run_one must still call
+    _on_task_terminal -- otherwise a parent task parked in
+    "awaiting_subtask" would never get resumed just because teardown
+    failed."""
+
+    def raising_teardown(task_id):
+        raise RuntimeError("docker daemon unreachable")
+
+    fake_sandbox = SimpleNamespace(teardown=raising_teardown)
+
+    async def fake_run_completes(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None):
+        t = session.get(Task, task_id)
+        t.status = "completed"
+        session.commit()
+
+    scheduler = Scheduler(
+        session_factory, lambda: None, lambda: None, cap=1, run_fn=fake_run_completes, sandbox_manager=fake_sandbox
+    )
+
+    parent = Task(description="parent", status="awaiting_subtask", full_auto=False)
+    db_session.add(parent)
+    db_session.commit()
+    child = Task(description="child", status="queued", full_auto=False, parent_task_id=parent.id)
+    db_session.add(child)
+    db_session.commit()
+    child_id = child.id
+
+    # Must not raise despite teardown() blowing up.
+    await scheduler._run_one(child_id, threading.Event())
+
+    db_session.expire_all()
+    refreshed_parent = db_session.get(Task, parent.id)
+    assert refreshed_parent.status == "queued"
+    assert refreshed_parent.queue_position is not None
+
+
 def test_mark_waiting_tasks_interrupted_covers_awaiting_sandbox_slot(db_session, session_factory):
     tid = make_queued_task(db_session)
     task = db_session.get(Task, tid)

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import threading
 from typing import Callable, Optional
 
@@ -6,6 +7,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import Event, Task
+
+logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 0.05
 # How long stop() waits for in-flight task runs to notice their
@@ -320,14 +323,33 @@ class Scheduler:
                 # before this; reading Task.status off it would be stale or
                 # raise. Open a fresh session for this check, same pattern
                 # _on_task_terminal uses right after for its own lookup.
-                status_session = self.session_factory()
+                #
+                # This whole block is best-effort: a failure here (DB lookup
+                # or the teardown call itself, e.g. Docker daemon down or
+                # container already removed) must never prevent
+                # _on_task_terminal below from running, since that's what
+                # resumes a parent task waiting in "awaiting_subtask" (and
+                # teardown() itself handles resuming any task waiting in
+                # "awaiting_sandbox_slot").
                 try:
-                    status_task = status_session.get(Task, task_id)
-                    is_terminal = status_task is not None and status_task.status in TERMINAL_STATUSES
-                finally:
-                    status_session.close()
-                if is_terminal:
-                    self.sandbox_manager.teardown(task_id)
+                    status_session = self.session_factory()
+                    try:
+                        status_task = status_session.get(Task, task_id)
+                        is_terminal = status_task is not None and status_task.status in TERMINAL_STATUSES
+                    finally:
+                        status_session.close()
+                    if is_terminal:
+                        # Container teardown can block for several seconds
+                        # (e.g. stopping a real Docker container); run it off
+                        # the event loop so it doesn't freeze _loop_forever
+                        # and every other coroutine (API requests, kill/stop
+                        # handling) while it waits.
+                        await asyncio.to_thread(self.sandbox_manager.teardown, task_id)
+                except Exception:
+                    logger.exception(
+                        "sandbox teardown failed for task %s; continuing to _on_task_terminal",
+                        task_id,
+                    )
             self._on_task_terminal(task_id)
 
     def _on_task_terminal(self, task_id: int) -> None:
