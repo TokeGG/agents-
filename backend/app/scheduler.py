@@ -283,9 +283,9 @@ class Scheduler:
             if asyncio.iscoroutinefunction(self.run_fn):
                 # Test doubles may be async; real run_fn (run_task_loop) is
                 # sync and blocking, so it runs in a worker thread below.
-                await self.run_fn(*args)
+                await self.run_fn(*args, sandbox_manager=self.sandbox_manager)
             else:
-                await asyncio.to_thread(self.run_fn, *args)
+                await asyncio.to_thread(self.run_fn, *args, sandbox_manager=self.sandbox_manager)
         except Exception as exc:  # noqa: BLE001 - must never leave a task stuck "running" silently
             session.rollback()
             task = session.get(Task, task_id)
