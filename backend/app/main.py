@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -67,6 +68,20 @@ def run_startup_recovery(session_factory) -> None:
         session.close()
 
 
+REAPER_POLL_INTERVAL_SECONDS = 60
+
+
+async def _run_idle_reaper(sandbox_manager, session_factory) -> None:
+    while True:
+        await asyncio.sleep(REAPER_POLL_INTERVAL_SECONDS)
+        session = session_factory()
+        try:
+            sandbox_manager.reap_idle(session)
+        finally:
+            if session is not None and hasattr(session, "close"):
+                session.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     session_factory = lambda: app.dependency_overrides.get(get_session_factory, get_session_factory)()()
@@ -81,7 +96,13 @@ async def lifespan(app: FastAPI):
     app.state.scheduler = scheduler
     run_startup_recovery(scheduler.session_factory)
     await scheduler.start()
+    reaper_task = asyncio.create_task(_run_idle_reaper(sandbox_manager, session_factory))
     yield
+    reaper_task.cancel()
+    try:
+        await reaper_task
+    except asyncio.CancelledError:
+        pass
     await scheduler.stop()
 
 

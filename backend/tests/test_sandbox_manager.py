@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.models import Task
 from app.sandbox.manager import SandboxManager
 from app.sandbox.runtime import FakeContainerRuntime, SandboxSlotUnavailable
 
@@ -77,3 +78,27 @@ def test_edit_file_replaces_content(tmp_path):
     read_result = manager.read_file(task_id=1, path="hello.txt")
     assert "hello there" in read_result["output"]
     assert "world" not in read_result["output"]
+
+
+def test_reap_idle_commits_and_stops_long_paused_task(tmp_path, db_session):
+    runtime = FakeContainerRuntime(base_dir=tmp_path)
+    manager = SandboxManager(runtime, session_factory=lambda: db_session, cap=2, idle_timeout_seconds=0)
+    task = Task(description="x", status="awaiting_answer", full_auto=False)
+    db_session.add(task); db_session.commit()
+    container_id = manager.get_or_create_container(task.id)
+    (tmp_path / manager._volume_name(task.id) / "file.txt").write_text("hello")
+    manager.reap_idle(db_session)
+    assert runtime.is_stopped(container_id)
+    # committed, not lost: a fresh container on the same volume still has it
+    assert (tmp_path / manager._volume_name(task.id) / "file.txt").exists()
+
+
+def test_reap_idle_does_not_reap_recently_paused_task(tmp_path, db_session):
+    runtime = FakeContainerRuntime(base_dir=tmp_path)
+    manager = SandboxManager(runtime, session_factory=lambda: db_session, cap=2, idle_timeout_seconds=10_000)
+    task = Task(description="x", status="awaiting_answer", full_auto=False)
+    db_session.add(task); db_session.commit()
+    container_id = manager.get_or_create_container(task.id)
+    (tmp_path / manager._volume_name(task.id) / "file.txt").write_text("hello")
+    manager.reap_idle(db_session)
+    assert runtime.is_stopped(container_id) is False

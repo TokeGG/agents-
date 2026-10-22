@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 
+from app.models import Task
 from app.sandbox.runtime import ContainerRuntime, SandboxSlotUnavailable
+
+WAITING_STATUSES = {
+    "awaiting_answer",
+    "awaiting_approval",
+    "awaiting_subtask",
+    "awaiting_sandbox_slot",
+}
 
 
 class SandboxManager:
@@ -38,6 +47,7 @@ class SandboxManager:
         self._slots: dict[int, str] = {}
         self._waiting: list[int] = []
         self._volume_names: dict[int, str] = {}
+        self._paused_since: dict[int, float] = {}
 
     def get_or_create_container(self, task_id: int) -> str:
         if task_id in self._slots:
@@ -84,6 +94,32 @@ class SandboxManager:
                 finally:
                     if session is not None and hasattr(session, "close"):
                         session.close()
+
+    def _volume_name(self, task_id: int) -> str | None:
+        return self._volume_names.get(task_id)
+
+    def reap_idle(self, session) -> None:
+        """Auto-commits and stops (but does not remove) containers for tasks that
+        have been sitting in a waiting status longer than `idle_timeout_seconds`."""
+        now = time.monotonic()
+        for task_id in list(self._slots):
+            task = session.get(Task, task_id)
+            status = task.status if task is not None else None
+
+            if status not in WAITING_STATUSES:
+                self._paused_since.pop(task_id, None)
+                continue
+
+            paused_at = self._paused_since.setdefault(task_id, now)
+            if now - paused_at < self.idle_timeout_seconds:
+                continue
+
+            container_id = self._slots.get(task_id)
+            if container_id is None:
+                continue
+
+            self.run_shell(task_id, "git add -A && git commit -m 'auto-commit before idle reap' || true")
+            self.runtime.stop_container(container_id)
 
     def run_shell(self, task_id: int, command: str, timeout: int = 120) -> dict:
         container_id = self.get_or_create_container(task_id)

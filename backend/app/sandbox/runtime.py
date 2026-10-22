@@ -52,6 +52,7 @@ class FakeContainerRuntime:
     def __init__(self, base_dir: Path):
         self._base_dir = Path(base_dir)
         self._containers: dict[str, dict] = {}
+        self._stopped: set[str] = set()
 
     def create_volume(self, name: str) -> None:
         (self._base_dir / name).mkdir(parents=True, exist_ok=True)
@@ -90,13 +91,17 @@ class FakeContainerRuntime:
         return proc.returncode, truncate_output(proc.stdout + proc.stderr)
 
     def stop_container(self, container_id: str) -> None:
-        self._containers.pop(container_id, None)
+        self._stopped.add(container_id)
 
     def remove_container(self, container_id: str) -> None:
         self._containers.pop(container_id, None)
+        self._stopped.discard(container_id)
 
     def remove_volume(self, name: str) -> None:
         shutil.rmtree(self._base_dir / name, ignore_errors=True)
+
+    def is_stopped(self, container_id: str) -> bool:
+        return container_id in self._stopped
 
 
 class DockerContainerRuntime:
