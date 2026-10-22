@@ -76,14 +76,17 @@ class FakeContainerRuntime:
 
     def exec(self, container_id: str, command: str, timeout: int) -> tuple[int, str]:
         volume_dir = self._containers[container_id]["volume_dir"]
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=volume_dir,
-            timeout=timeout,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=volume_dir,
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired:
+            return -1, f"command timed out after {timeout}s"
         return proc.returncode, truncate_output(proc.stdout + proc.stderr)
 
     def stop_container(self, container_id: str) -> None:
