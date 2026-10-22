@@ -230,6 +230,7 @@ def run_task_loop(
     interrupt_event: threading.Event | None = None,
     sandbox_manager=None,
     reviewer_adapter: ModelAdapter | None = None,
+    browser_service=None,
 ) -> None:
     if reviewer_adapter is None:
         reviewer_adapter = worker_adapter
@@ -332,7 +333,13 @@ def run_task_loop(
             _add_event(session, task_id, "approval_request", {"tool_name": tool_name, "arguments": arguments})
             return
 
-        ctx = ToolContext(task_id=task_id, session=session, scheduler=scheduler, sandbox_manager=sandbox_manager)
+        ctx = ToolContext(
+            task_id=task_id,
+            session=session,
+            scheduler=scheduler,
+            sandbox_manager=sandbox_manager,
+            browser_service=browser_service,
+        )
         try:
             result = tool.run(arguments, ctx)
         except SandboxSlotUnavailable:

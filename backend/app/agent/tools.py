@@ -1,4 +1,6 @@
+import base64
 import shlex
+import uuid
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -6,6 +8,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.models import Event, Task
+from app.sandbox.runtime import truncate_output
 
 
 @dataclass
@@ -14,6 +17,7 @@ class ToolContext:
     session: Session
     scheduler: object | None = None
     sandbox_manager: object | None = None
+    browser_service: object | None = None
 
 
 class Tool(Protocol):
@@ -325,3 +329,69 @@ class _CheckSubtaskTool:
 
 
 check_subtask_tool = _CheckSubtaskTool()
+
+
+_NO_BROWSER_RESULT = {
+    "ok": False,
+    "output": "browser automation is not available for this task",
+    "data": None,
+}
+
+
+class _BrowseTool:
+    name = "browse"
+    description = "Navigate the task's browser context to a URL and return the page title and visible text."
+    parameters_schema = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}},
+        "required": ["url"],
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        if ctx.browser_service is None:
+            return _NO_BROWSER_RESULT
+        context = ctx.browser_service.get_or_create_context(ctx.task_id)
+        page = context.new_page()
+        page.goto(arguments["url"])
+        title = page.title()
+        text = page.inner_text("body")
+        return {"ok": True, "output": truncate_output(f"{title}\n{text}"), "data": None}
+
+
+browse_tool = _BrowseTool()
+
+
+class _DownloadFileTool:
+    name = "download_file"
+    description = (
+        "Download a URL's bytes via the task's browser context into the task's "
+        "sandbox volume, so the file is usable by run_shell/read_file afterward."
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}, "save_as": {"type": "string"}},
+        "required": ["url", "save_as"],
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        if ctx.browser_service is None or ctx.sandbox_manager is None:
+            return _NO_BROWSER_RESULT
+        context = ctx.browser_service.get_or_create_context(ctx.task_id)
+        response = context.request.get(arguments["url"])
+        body = response.body()
+        # `SandboxManager.write_file` takes a string (Task 2's signature); downloaded
+        # content is arbitrary bytes, so it is base64-encoded here and decoded on the
+        # shell side via `base64 -d`, rather than extending write_file to accept
+        # bytes. This keeps write_file's existing string-only contract (and every
+        # other caller of it) untouched, at the cost of a slightly larger
+        # over-the-wire payload for downloads specifically.
+        encoded = base64.b64encode(body).decode("ascii")
+        marker = f"__B64_{uuid.uuid4().hex}__"
+        command = (
+            f"base64 -d << '{marker}' > {shlex.quote(arguments['save_as'])}\n"
+            f"{encoded}\n{marker}\n"
+        )
+        return ctx.sandbox_manager.run_shell(ctx.task_id, command)
+
+
+download_file_tool = _DownloadFileTool()

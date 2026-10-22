@@ -60,6 +60,7 @@ class Scheduler:
         run_fn: Optional[Callable] = None,
         sandbox_manager=None,
         reviewer_adapter_factory: Optional[Callable] = None,
+        browser_service=None,
     ):
         self.session_factory = session_factory
         # The *worker* model factory (cheap/default tier). Named adapter_factory
@@ -73,6 +74,7 @@ class Scheduler:
         self.reviewer_adapter_factory = reviewer_adapter_factory or adapter_factory
         self._cap = cap
         self.sandbox_manager = sandbox_manager
+        self.browser_service = browser_service
         if run_fn is None:
             from app.agent.loop import run_task_loop
 
@@ -365,6 +367,24 @@ class Scheduler:
                 except Exception:
                     logger.exception(
                         "sandbox teardown failed for task %s; continuing to _on_task_terminal",
+                        task_id,
+                    )
+            if self.browser_service is not None:
+                # Same best-effort pattern as the sandbox teardown above: a
+                # failure here (e.g. the browser process already gone) must
+                # never prevent _on_task_terminal from running.
+                try:
+                    status_session = self.session_factory()
+                    try:
+                        status_task = status_session.get(Task, task_id)
+                        is_terminal = status_task is not None and status_task.status in TERMINAL_STATUSES
+                    finally:
+                        status_session.close()
+                    if is_terminal:
+                        await asyncio.to_thread(self.browser_service.close_context, task_id)
+                except Exception:
+                    logger.exception(
+                        "browser context teardown failed for task %s; continuing to _on_task_terminal",
                         task_id,
                     )
             self._on_task_terminal(task_id)

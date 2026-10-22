@@ -9,8 +9,10 @@ from app.agent.model_adapter import ModelAdapter, OpenAICompatAdapter
 from app.agent.tools import (
     ToolRegistry,
     ask_user_tool,
+    browse_tool,
     check_subtask_tool,
     delegate_task_tool,
+    download_file_tool,
     edit_file_tool,
     http_get_tool,
     read_file_tool,
@@ -21,6 +23,7 @@ from app.agent.tools import (
 from app.db import get_session
 from app.models import Event, Rating, Task
 from app.agent.tools import ToolContext
+from app.browser.service import BrowserService
 from app.sandbox.manager import SandboxManager
 from app.sandbox.runtime import DockerContainerRuntime
 from app.schemas import (
@@ -66,6 +69,8 @@ def get_registry() -> ToolRegistry:
     registry.register(read_file_tool)
     registry.register(write_file_tool)
     registry.register(edit_file_tool)
+    registry.register(browse_tool)
+    registry.register(download_file_tool)
     return registry
 
 
@@ -75,6 +80,13 @@ def get_sandbox_manager(session_factory) -> SandboxManager:
     app.dependency_overrides with a fake, same lazy-override pattern as
     get_adapter/get_registry."""
     return SandboxManager(DockerContainerRuntime(), session_factory=session_factory)
+
+
+def get_browser_service() -> BrowserService:
+    """Real (non-test) BrowserService. Built lazily by callers (lifespan
+    wiring) so tests can override this via app.dependency_overrides with a
+    fake, same lazy-override pattern as get_sandbox_manager/get_registry."""
+    return BrowserService()
 
 
 def get_scheduler(request: Request):
@@ -181,6 +193,7 @@ def approve_task(
                 session=session,
                 scheduler=scheduler,
                 sandbox_manager=getattr(scheduler, "sandbox_manager", None),
+                browser_service=getattr(scheduler, "browser_service", None),
             )
             try:
                 result = tool.run(arguments, ctx)

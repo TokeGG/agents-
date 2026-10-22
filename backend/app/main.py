@@ -8,6 +8,7 @@ from app.api.events import router as events_router
 from app.api.kill_switch import router as kill_switch_router
 from app.api.tasks import (
     get_adapter,
+    get_browser_service,
     get_registry,
     get_reviewer_adapter,
     get_sandbox_manager,
@@ -92,6 +93,7 @@ async def _run_idle_reaper(sandbox_manager, session_factory) -> None:
 async def lifespan(app: FastAPI):
     session_factory = lambda: app.dependency_overrides.get(get_session_factory, get_session_factory)()()
     sandbox_manager = app.dependency_overrides.get(get_sandbox_manager, get_sandbox_manager)(session_factory)
+    browser_service = app.dependency_overrides.get(get_browser_service, get_browser_service)()
     scheduler = Scheduler(
         session_factory=session_factory,
         adapter_factory=lambda: app.dependency_overrides.get(get_adapter, get_adapter)(),
@@ -100,6 +102,7 @@ async def lifespan(app: FastAPI):
             get_reviewer_adapter, get_reviewer_adapter
         )(),
         sandbox_manager=sandbox_manager,
+        browser_service=browser_service,
     )
     sandbox_manager.scheduler = scheduler
     app.state.scheduler = scheduler
