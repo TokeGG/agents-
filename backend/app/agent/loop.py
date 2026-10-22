@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 
 import httpx
@@ -10,6 +11,8 @@ from app.agent.permissions import needs_approval
 from app.agent.tools import ToolContext, ToolRegistry
 from app.models import Event, Task
 from app.sandbox.runtime import SandboxSlotUnavailable
+
+logger = logging.getLogger(__name__)
 
 UNKNOWN_TOOL_OPTIONS = [
     "register this tool via the connector forge (not yet built)",
@@ -133,6 +136,16 @@ def _review_flags_problem(review_step: dict) -> bool:
     return False
 
 
+def _review_feedback_text(review_step: dict) -> str:
+    """Renders the reviewer's flagged finding as text the worker's fix call can see."""
+    if review_step["type"] == "tool_call":
+        return (
+            f"report_gap(reason={review_step.get('arguments', {}).get('reason')!r}, "
+            f"arguments={review_step.get('arguments')!r})"
+        )
+    return review_step.get("content") or ""
+
+
 def _run_post_task_review(
     session: Session,
     task: Task,
@@ -141,10 +154,14 @@ def _run_post_task_review(
     reviewer_adapter: ModelAdapter,
     registry: ToolRegistry,
     sandbox_manager,
+    scheduler=None,
 ) -> None:
     """Bounded, additive-only post-task review: one reviewer call to look at the
-    sandbox's git diff, and if it flags a problem, exactly one worker fix call.
-    Never loops back into review again, regardless of what the fix step produces."""
+    sandbox's git diff, and if it flags a problem, exactly one worker fix call
+    that sees the reviewer's finding and, if it returns a tool call, actually
+    executes it. Never loops back into review again, regardless of what the
+    fix step produces. Any exception here is caught by the caller so a review-
+    pass failure never stops the task from completing."""
     diff_result = sandbox_manager.run_shell(task.id, "git diff")
     review_messages = messages + [
         {
@@ -157,8 +174,41 @@ def _run_post_task_review(
         }
     ]
     review_step = reviewer_adapter.complete(review_messages, registry.specs())
-    if _review_flags_problem(review_step):
-        worker_adapter.complete(messages, registry.specs())
+    flagged = _review_flags_problem(review_step)
+    fix_summary = "not attempted (no problem flagged)"
+    if flagged:
+        feedback_text = _review_feedback_text(review_step)
+        fix_messages = messages + [
+            {
+                "role": "user",
+                "content": (
+                    "A reviewer examined your work and flagged the following problem. "
+                    "Address it if you can.\n\n" + feedback_text
+                ),
+            }
+        ]
+        fix_step = worker_adapter.complete(fix_messages, registry.specs())
+        if fix_step["type"] == "tool_call":
+            tool = registry.get(fix_step["tool_name"])
+            if tool is None:
+                fix_summary = f"worker called unknown tool '{fix_step['tool_name']}'"
+            else:
+                ctx = ToolContext(
+                    task_id=task.id, session=session, scheduler=scheduler, sandbox_manager=sandbox_manager
+                )
+                try:
+                    result = tool.run(fix_step["arguments"], ctx)
+                    fix_summary = f"executed tool '{fix_step['tool_name']}': {result}"
+                except Exception as exc:  # noqa: BLE001 - this is a best-effort fix step
+                    fix_summary = f"tool '{fix_step['tool_name']}' raised: {exc}"
+        else:
+            fix_summary = f"worker response: {fix_step.get('content', '')}"
+    _add_event(
+        session,
+        task.id,
+        "post_task_review",
+        {"flagged": flagged, "fix_summary": fix_summary},
+    )
 
 
 def run_task_loop(
@@ -215,7 +265,13 @@ def run_task_loop(
                 and sandbox_manager is not None
                 and task_id in getattr(sandbox_manager, "_slots", {})
             ):
-                _run_post_task_review(session, task, messages, worker_adapter, reviewer_adapter, registry, sandbox_manager)
+                try:
+                    _run_post_task_review(
+                        session, task, messages, worker_adapter, reviewer_adapter, registry,
+                        sandbox_manager, scheduler=scheduler,
+                    )
+                except Exception:
+                    logger.exception("post-task review pass failed for task %s; completing anyway", task_id)
             task.status = "completed"
             # Status and the reflection event are committed together (status
             # is set but not yet committed here) so a concurrent reader never

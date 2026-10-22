@@ -305,3 +305,75 @@ def test_post_task_review_skipped_without_sandbox_manager(db_session, task):
     )
     assert reviewer_calls == []
     assert db_session.get(Task, task.id).status == "completed"
+
+
+def test_post_task_review_flags_problem_and_runs_fix_with_finding_visible(tmp_path, db_session, task):
+    runtime = FakeContainerRuntime(base_dir=tmp_path)
+    manager = SandboxManager(runtime, session_factory=lambda: db_session, cap=2)
+    manager.get_or_create_container(task.id)
+
+    # Worker: final answer, then (when fixing) a tool call to execute.
+    worker = FakeModelAdapter(script=[
+        {"type": "final_answer", "content": "done"},
+        {"type": "tool_call", "tool_name": "http_get", "arguments": {"url": "http://x"}},
+    ])
+
+    reviewer_calls = []
+
+    class _FlaggingReviewer:
+        def complete(self, messages, tools):
+            reviewer_calls.append(messages)
+            return {
+                "type": "tool_call",
+                "tool_name": "report_gap",
+                "arguments": {"reason": "diff removes the test file", "options": []},
+            }
+
+    def fake_get(url):
+        return httpx.Response(200, text="ok", request=httpx.Request("GET", url))
+
+    registry = ToolRegistry()
+    registry.register(http_get_tool)
+
+    orig_get = httpx.get
+    httpx.get = fake_get
+    try:
+        run_task_loop(
+            task.id, db_session, worker, registry,
+            reviewer_adapter=_FlaggingReviewer(), sandbox_manager=manager,
+        )
+    finally:
+        httpx.get = orig_get
+
+    # Reviewer ran exactly once (no second review round).
+    assert len(reviewer_calls) == 1
+    # The fix call's messages included the reviewer's finding.
+    assert worker._index == 2  # both scripted worker steps were consumed
+    task_row = db_session.get(Task, task.id)
+    assert task_row.status == "completed"
+    review_events = db_session.query(Event).filter_by(task_id=task.id, type="post_task_review").all()
+    assert len(review_events) == 1
+    assert review_events[0].payload["flagged"] is True
+    assert "http_get" in review_events[0].payload["fix_summary"]
+
+
+def test_post_task_review_errors_do_not_block_completion(db_session, task):
+    worker = FakeModelAdapter(script=[{"type": "final_answer", "content": "done"}])
+
+    class _RaisingManager:
+        def run_shell(self, task_id, command):
+            raise RuntimeError("container reaped mid-review")
+
+    manager = _RaisingManager()
+    manager._slots = {task.id: object()}
+
+    class _RecordingReviewer:
+        def complete(self, messages, tools):
+            raise AssertionError("reviewer should not be reached when run_shell raises")
+
+    run_task_loop(
+        task.id, db_session, worker, ToolRegistry(),
+        reviewer_adapter=_RecordingReviewer(), sandbox_manager=manager,
+    )
+    assert db_session.get(Task, task.id).status == "completed"
+    assert db_session.query(Event).filter_by(task_id=task.id, type="post_task_review").count() == 0
