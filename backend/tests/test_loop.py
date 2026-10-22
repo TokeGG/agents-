@@ -5,7 +5,8 @@ import httpx
 from app.agent.loop import run_task_loop
 from app.agent.model_adapter import FakeModelAdapter
 from app.agent.tools import ToolRegistry, ask_user_tool, delegate_task_tool, http_get_tool, report_gap_tool
-from app.sandbox.runtime import SandboxSlotUnavailable
+from app.sandbox.manager import SandboxManager
+from app.sandbox.runtime import FakeContainerRuntime, SandboxSlotUnavailable
 from tests.test_tools import FakeSchedulerSpy
 from app.models import Event, Task
 
@@ -267,3 +268,40 @@ def test_loop_escalates_to_reviewer_after_repeated_failures(db_session, task):
     registry.register(_AlwaysFailsTool())
     run_task_loop(task.id, db_session, worker, registry, reviewer_adapter=reviewer)
     assert db_session.get(Task, task.id).status == "completed"  # reviewer's final_answer was used
+
+
+def test_post_task_review_runs_once_then_completes_regardless(tmp_path, db_session, task):
+    runtime = FakeContainerRuntime(base_dir=tmp_path)
+    manager = SandboxManager(runtime, session_factory=lambda: db_session, cap=2)
+    manager.get_or_create_container(task.id)  # task has a sandbox
+    worker = FakeModelAdapter(script=[{"type": "final_answer", "content": "done"}])
+    reviewer_calls = []
+
+    class _RecordingReviewer:
+        def complete(self, messages, tools):
+            reviewer_calls.append(messages)
+            return {"type": "final_answer", "content": "looks fine"}
+
+    run_task_loop(
+        task.id, db_session, worker, ToolRegistry(),
+        reviewer_adapter=_RecordingReviewer(), sandbox_manager=manager,
+    )
+    assert len(reviewer_calls) == 1
+    assert db_session.get(Task, task.id).status == "completed"
+
+
+def test_post_task_review_skipped_without_sandbox_manager(db_session, task):
+    worker = FakeModelAdapter(script=[{"type": "final_answer", "content": "done"}])
+    reviewer_calls = []
+
+    class _RecordingReviewer:
+        def complete(self, messages, tools):
+            reviewer_calls.append(messages)
+            return {"type": "final_answer", "content": "looks fine"}
+
+    run_task_loop(
+        task.id, db_session, worker, ToolRegistry(),
+        reviewer_adapter=_RecordingReviewer(), sandbox_manager=None,
+    )
+    assert reviewer_calls == []
+    assert db_session.get(Task, task.id).status == "completed"

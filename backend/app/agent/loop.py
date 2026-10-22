@@ -121,6 +121,46 @@ def _interrupt_if_requested(session: Session, task: Task, interrupt_event) -> bo
     return True
 
 
+def _review_flags_problem(review_step: dict) -> bool:
+    """True if the reviewer's response amounts to flagging a problem: either a
+    tool_call to report_gap, or a plain message that reads as raising a concern
+    rather than a clean bill of health."""
+    if review_step["type"] == "tool_call" and review_step.get("tool_name") == "report_gap":
+        return True
+    if review_step["type"] == "final_answer":
+        content = (review_step.get("content") or "").lower()
+        return "problem" in content or "issue" in content or "bug" in content or "concern" in content
+    return False
+
+
+def _run_post_task_review(
+    session: Session,
+    task: Task,
+    messages: list[dict],
+    worker_adapter: ModelAdapter,
+    reviewer_adapter: ModelAdapter,
+    registry: ToolRegistry,
+    sandbox_manager,
+) -> None:
+    """Bounded, additive-only post-task review: one reviewer call to look at the
+    sandbox's git diff, and if it flags a problem, exactly one worker fix call.
+    Never loops back into review again, regardless of what the fix step produces."""
+    diff_result = sandbox_manager.run_shell(task.id, "git diff")
+    review_messages = messages + [
+        {
+            "role": "user",
+            "content": (
+                "Review the following git diff against the task description and flag any "
+                "problem you see.\n\nTask description:\n"
+                f"{task.description}\n\nGit diff:\n{diff_result.get('output', '')}"
+            ),
+        }
+    ]
+    review_step = reviewer_adapter.complete(review_messages, registry.specs())
+    if _review_flags_problem(review_step):
+        worker_adapter.complete(messages, registry.specs())
+
+
 def run_task_loop(
     task_id: int,
     session: Session,
@@ -170,6 +210,12 @@ def run_task_loop(
 
         if step["type"] == "final_answer":
             messages.append({"role": "assistant", "content": step.get("content", "")})
+            if (
+                reviewer_adapter is not worker_adapter
+                and sandbox_manager is not None
+                and task_id in getattr(sandbox_manager, "_slots", {})
+            ):
+                _run_post_task_review(session, task, messages, worker_adapter, reviewer_adapter, registry, sandbox_manager)
             task.status = "completed"
             # Status and the reflection event are committed together (status
             # is set but not yet committed here) so a concurrent reader never
