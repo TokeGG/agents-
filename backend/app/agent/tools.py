@@ -1,3 +1,4 @@
+import shlex
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -12,6 +13,7 @@ class ToolContext:
     task_id: int
     session: Session
     scheduler: object | None = None
+    sandbox_manager: object | None = None
 
 
 class Tool(Protocol):
@@ -53,6 +55,9 @@ class _HttpGetTool:
     }
 
     def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        if ctx.sandbox_manager is not None:
+            url = arguments["url"]
+            return ctx.sandbox_manager.run_shell(ctx.task_id, f"curl -sS {shlex.quote(url)}")
         response = httpx.get(arguments["url"])
         body = response.text[:500]
         return {
@@ -63,6 +68,76 @@ class _HttpGetTool:
 
 
 http_get_tool = _HttpGetTool()
+
+
+class _RunShellTool:
+    name = "run_shell"
+    description = "Run a shell command in the task's sandbox container."
+    parameters_schema = {
+        "type": "object",
+        "properties": {"command": {"type": "string"}},
+        "required": ["command"],
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        return ctx.sandbox_manager.run_shell(ctx.task_id, arguments["command"])
+
+
+run_shell_tool = _RunShellTool()
+
+
+class _ReadFileTool:
+    name = "read_file"
+    description = "Read a file from the task's sandbox container."
+    parameters_schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        return ctx.sandbox_manager.read_file(ctx.task_id, arguments["path"])
+
+
+read_file_tool = _ReadFileTool()
+
+
+class _WriteFileTool:
+    name = "write_file"
+    description = "Write a file in the task's sandbox container."
+    parameters_schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"],
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        return ctx.sandbox_manager.write_file(ctx.task_id, arguments["path"], arguments["content"])
+
+
+write_file_tool = _WriteFileTool()
+
+
+class _EditFileTool:
+    name = "edit_file"
+    description = "Replace a snippet of text in a file in the task's sandbox container."
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "old": {"type": "string"},
+            "new": {"type": "string"},
+        },
+        "required": ["path", "old", "new"],
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        return ctx.sandbox_manager.edit_file(
+            ctx.task_id, arguments["path"], arguments["old"], arguments["new"]
+        )
+
+
+edit_file_tool = _EditFileTool()
 
 
 class _AskUserTool:

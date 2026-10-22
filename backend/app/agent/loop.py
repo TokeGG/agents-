@@ -8,6 +8,7 @@ from app.agent.model_adapter import ModelAdapter
 from app.agent.permissions import needs_approval
 from app.agent.tools import ToolContext, ToolRegistry
 from app.models import Event, Task
+from app.sandbox.runtime import SandboxSlotUnavailable
 
 UNKNOWN_TOOL_OPTIONS = [
     "register this tool via the connector forge (not yet built)",
@@ -126,6 +127,7 @@ def run_task_loop(
     registry: ToolRegistry,
     scheduler=None,
     interrupt_event: threading.Event | None = None,
+    sandbox_manager=None,
 ) -> None:
     task = session.get(Task, task_id)
     messages = _build_initial_messages(session, task)
@@ -208,9 +210,15 @@ def run_task_loop(
             _add_event(session, task_id, "approval_request", {"tool_name": tool_name, "arguments": arguments})
             return
 
-        ctx = ToolContext(task_id=task_id, session=session, scheduler=scheduler)
+        ctx = ToolContext(task_id=task_id, session=session, scheduler=scheduler, sandbox_manager=sandbox_manager)
         try:
             result = tool.run(arguments, ctx)
+        except SandboxSlotUnavailable:
+            if _interrupt_if_requested(session, task, interrupt_event):
+                return
+            task.status = "awaiting_sandbox_slot"
+            session.commit()
+            return
         except (KeyError, TypeError, ValueError, httpx.HTTPError) as exc:
             result = {"ok": False, "output": f"tool call failed: {exc}", "data": None}
 

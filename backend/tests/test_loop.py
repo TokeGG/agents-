@@ -5,6 +5,7 @@ import httpx
 from app.agent.loop import run_task_loop
 from app.agent.model_adapter import FakeModelAdapter
 from app.agent.tools import ToolRegistry, ask_user_tool, delegate_task_tool, http_get_tool, report_gap_tool
+from app.sandbox.runtime import SandboxSlotUnavailable
 from tests.test_tools import FakeSchedulerSpy
 from app.models import Event, Task
 
@@ -52,6 +53,24 @@ def test_loop_pauses_on_approval_for_irreversible_tool(db_session, task):
     registry.register(_RaisingSendEmailTool())
     run_task_loop(task.id, db_session, adapter, registry)
     assert db_session.get(Task, task.id).status == "awaiting_approval"
+
+
+def test_loop_pauses_on_sandbox_slot_unavailable(db_session, task):
+    class _AlwaysUnavailableTool:
+        name = "run_shell"
+        description = "x"
+        parameters_schema = {"type": "object", "properties": {}}
+
+        def run(self, arguments, ctx):
+            raise SandboxSlotUnavailable(ctx.task_id)
+
+    adapter = FakeModelAdapter(script=[
+        {"type": "tool_call", "tool_name": "run_shell", "arguments": {}},
+    ])
+    registry = ToolRegistry()
+    registry.register(_AlwaysUnavailableTool())
+    run_task_loop(task.id, db_session, adapter, registry)
+    assert db_session.get(Task, task.id).status == "awaiting_sandbox_slot"
 
 
 def test_loop_fails_on_unknown_tool(db_session, task):
