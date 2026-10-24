@@ -6,3 +6,4 @@ httpx
 pytest
 pytest-asyncio
 playwright
+cryptography

@@ -46,3 +46,13 @@ class Rating(Base):
     value: Mapped[int] = mapped_column(Integer, nullable=False)
     comment: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class VaultSecret(Base):
+    __tablename__ = "vault_secrets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    service_name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    ciphertext: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
