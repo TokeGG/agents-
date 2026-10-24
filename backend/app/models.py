@@ -56,3 +56,23 @@ class VaultSecret(Base):
     ciphertext: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class Connector(Base):
+    __tablename__ = "connectors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Not UNIQUE at the DB level: a second row may share a name while pending
+    # (see registry.approve, which enforces name uniqueness on activation).
+    name: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    service_name: Mapped[str] = mapped_column(String, nullable=False)
+    purpose: Mapped[str] = mapped_column(String, nullable=False)
+    parameters_schema: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    source_code: Mapped[str] = mapped_column(String, nullable=False)
+    required_hosts: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending_review")
+    requested_by_task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
+    test_transcript: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(String, nullable=True)
