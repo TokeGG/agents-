@@ -155,6 +155,8 @@ def _run_post_task_review(
     registry: ToolRegistry,
     sandbox_manager,
     scheduler=None,
+    vault=None,
+    browser_service=None,
 ) -> None:
     """Bounded, additive-only post-task review: one reviewer call to look at the
     sandbox's git diff, and if it flags a problem, exactly one worker fix call
@@ -204,7 +206,12 @@ def _run_post_task_review(
                 )
             else:
                 ctx = ToolContext(
-                    task_id=task.id, session=session, scheduler=scheduler, sandbox_manager=sandbox_manager
+                    task_id=task.id,
+                    session=session,
+                    scheduler=scheduler,
+                    sandbox_manager=sandbox_manager,
+                    vault=vault,
+                    browser_service=browser_service,
                 )
                 try:
                     result = tool.run(fix_step["arguments"], ctx)
@@ -280,7 +287,7 @@ def run_task_loop(
                 try:
                     _run_post_task_review(
                         session, task, messages, worker_adapter, reviewer_adapter, registry,
-                        sandbox_manager, scheduler=scheduler,
+                        sandbox_manager, scheduler=scheduler, vault=vault, browser_service=browser_service,
                     )
                 except Exception:
                     logger.exception("post-task review pass failed for task %s; completing anyway", task_id)

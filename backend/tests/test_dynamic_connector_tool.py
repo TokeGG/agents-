@@ -86,6 +86,35 @@ def test_dynamic_connector_tool_provisions_and_shreds_credential(tmp_path, db_se
     assert not any(p.name.endswith(".token") for p in volume_dir.glob("secrets/*"))
 
 
+def test_dynamic_connector_tool_handles_rotated_vault_key(tmp_path, db_session, session_factory, task):
+    """If VAULT_ENCRYPTION_KEY was rotated without re-provisioning existing
+    secrets, Vault.get raises InvalidToken on the old ciphertext. The tool
+    must turn that into a normal failure result, not propagate the
+    exception."""
+    source = (
+        "import sys, json\n"
+        "print(json.dumps({'ok': True, 'output': 'should never run', 'data': None}))\n"
+    )
+    connector = Connector(name="github_create_issue", service_name="github", purpose="x",
+                           parameters_schema={"type": "object"}, source_code=source,
+                           required_hosts=[], status="active")
+    db_session.add(connector); db_session.commit()
+    manager = SandboxManager(FakeContainerRuntime(tmp_path), session_factory=session_factory, cap=2)
+
+    writer_vault = Vault(Vault.generate_key(), session_factory=session_factory)
+    writer_vault.set("github", "s3cr3t-value")
+
+    reader_vault = Vault(Vault.generate_key(), session_factory=session_factory)
+    tool = DynamicConnectorTool(connector)
+    ctx = ToolContext(task_id=task.id, session=db_session, sandbox_manager=manager, vault=reader_vault)
+
+    result = tool.run({}, ctx)
+    assert result["ok"] is False
+    assert result["data"] is None
+    assert "github" in result["output"]
+    assert "re-provision" in result["output"]
+
+
 def test_dynamic_connector_tool_isolates_cache_and_secret_per_task(tmp_path, db_session, session_factory):
     task_a = Task(description="a", status="running"); db_session.add(task_a)
     task_b = Task(description="b", status="running"); db_session.add(task_b)

@@ -23,6 +23,8 @@ import json
 import shlex
 import uuid
 
+from cryptography.fernet import InvalidToken
+
 from app.agent.tools import _NO_SANDBOX_RESULT
 from app.connectors.registry import Connector
 from app.connectors.secret_injection import provision_secret_file, redact_secret
@@ -96,7 +98,17 @@ class DynamicConnectorTool:
         secret_path = None
         vault = getattr(ctx, "vault", None)
         if vault is not None:
-            secret = vault.get(self.connector.service_name)
+            try:
+                secret = vault.get(self.connector.service_name)
+            except InvalidToken:
+                return {
+                    "ok": False,
+                    "output": (
+                        f"stored credential for {self.connector.service_name} cannot be "
+                        "decrypted (VAULT_ENCRYPTION_KEY changed?); re-provision it"
+                    ),
+                    "data": None,
+                }
             if secret is not None:
                 try:
                     secret_path = provision_secret_file(sandbox_manager, task_id, secret)

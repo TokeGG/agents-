@@ -1,6 +1,5 @@
 import os
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
@@ -221,7 +220,13 @@ def approve_task(
             )
             try:
                 result = tool.run(arguments, ctx)
-            except (KeyError, TypeError, ValueError, httpx.HTTPError) as exc:
+            except Exception as exc:  # noqa: BLE001 - mirrors run_task_loop's own
+                # generic tool-call-failure except clause: anything the tool
+                # call can raise (SandboxSlotUnavailable, a RuntimeError from
+                # run_shell against a stopped container, httpx.HTTPError, bad
+                # arguments, etc.) resolves to a normal failure result instead
+                # of an uncaught 500 that leaves the task stuck in
+                # awaiting_approval with no event recorded.
                 result = {"ok": False, "output": f"tool call failed: {exc}", "data": None}
         session.add(Event(task_id=task_id, type="tool_result", payload=result))
     else:
