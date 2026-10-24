@@ -61,6 +61,7 @@ class Scheduler:
         sandbox_manager=None,
         reviewer_adapter_factory: Optional[Callable] = None,
         browser_service=None,
+        vault=None,
     ):
         self.session_factory = session_factory
         # The *worker* model factory (cheap/default tier). Named adapter_factory
@@ -75,6 +76,7 @@ class Scheduler:
         self._cap = cap
         self.sandbox_manager = sandbox_manager
         self.browser_service = browser_service
+        self.vault = vault
         if run_fn is None:
             from app.agent.loop import run_task_loop
 
@@ -326,6 +328,7 @@ class Scheduler:
                     sandbox_manager=self.sandbox_manager,
                     reviewer_adapter=self.reviewer_adapter_factory(),
                     browser_service=self.browser_service,
+                    vault=self.vault,
                 )
             else:
                 await asyncio.to_thread(
@@ -334,6 +337,7 @@ class Scheduler:
                     sandbox_manager=self.sandbox_manager,
                     reviewer_adapter=self.reviewer_adapter_factory(),
                     browser_service=self.browser_service,
+                    vault=self.vault,
                 )
         except Exception as exc:  # noqa: BLE001 - must never leave a task stuck "running" silently
             session.rollback()

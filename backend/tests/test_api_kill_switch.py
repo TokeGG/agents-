@@ -19,7 +19,7 @@ class _SlowTool:
         return {"ok": True, "output": "done", "data": None}
 
 
-def _registry_with_slow_tool():
+def _registry_with_slow_tool(session=None):
     from app.agent.tools import ToolRegistry, ask_user_tool, http_get_tool, report_gap_tool
 
     registry = ToolRegistry()

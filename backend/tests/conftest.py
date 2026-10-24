@@ -28,6 +28,18 @@ def _default_sandbox_egress_allowlist(monkeypatch):
     monkeypatch.setenv("SANDBOX_EGRESS_ALLOWLIST", "api.example.com")
 
 
+@pytest.fixture(autouse=True)
+def _default_vault_encryption_key(monkeypatch):
+    """The app now fails closed at startup (lifespan) when
+    VAULT_ENCRYPTION_KEY is unset. Default it here so existing tests that
+    spin up a TestClient (triggering lifespan) don't all need to set it
+    themselves; a test that wants to exercise the unset case uses
+    monkeypatch.delenv itself to override this default."""
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("VAULT_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+
 @pytest.fixture()
 def db_session(session_factory):
     session = session_factory()
@@ -70,7 +82,7 @@ def client(monkeypatch):
     def override_get_session_factory():
         return TestSessionLocal
 
-    def override_get_registry():
+    def override_get_registry(session=None):
         registry = ToolRegistry()
         registry.register(http_get_tool)
         registry.register(ask_user_tool)

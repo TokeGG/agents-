@@ -2,6 +2,23 @@ import time
 
 from app.agent.model_adapter import FakeModelAdapter
 from app.api import tasks as tasks_module
+from app.api.tasks import get_registry
+from app.connectors.registry import approve
+from app.models import Connector
+
+
+def test_get_registry_loads_active_connectors(db_session, task):
+    from app.connectors.registry import create_pending
+
+    create_pending(
+        db_session, name="github_create_issue", service_name="github", purpose="x",
+        parameters_schema={"type": "object"}, source_code="print('hi')",
+        required_hosts=[], requested_by_task_id=task.id, test_transcript={},
+    )
+    approve(db_session, db_session.query(Connector).one().id, approved_by="user")
+    registry = get_registry(session=db_session)
+    assert registry.get("github_create_issue") is not None
+    assert registry.get("github_create_issue").name == "github_create_issue"
 
 
 def wait_for_status(client, task_id, *statuses, timeout=10.0):
@@ -90,7 +107,7 @@ def test_approve_denial_does_not_execute_tool_and_records_denial(client):
         def run(self, arguments, ctx):
             raise AssertionError("send_email should not run when approval is denied")
 
-    def registry_with_send_email():
+    def registry_with_send_email(session=None):
         from app.agent.tools import ToolRegistry, ask_user_tool, http_get_tool, report_gap_tool
 
         registry = ToolRegistry()

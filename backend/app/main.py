@@ -13,6 +13,7 @@ from app.api.tasks import (
     get_registry,
     get_reviewer_adapter,
     get_sandbox_manager,
+    get_vault,
     router as tasks_router,
 )
 from app.db import get_session_factory
@@ -110,15 +111,17 @@ async def lifespan(app: FastAPI):
     session_factory = lambda: app.dependency_overrides.get(get_session_factory, get_session_factory)()()
     sandbox_manager = app.dependency_overrides.get(get_sandbox_manager, get_sandbox_manager)(session_factory)
     browser_service = app.dependency_overrides.get(get_browser_service, get_browser_service)()
+    vault = app.dependency_overrides.get(get_vault, get_vault)(session_factory)
     scheduler = Scheduler(
         session_factory=session_factory,
         adapter_factory=lambda: app.dependency_overrides.get(get_adapter, get_adapter)(),
-        registry_factory=lambda: app.dependency_overrides.get(get_registry, get_registry)(),
+        registry_factory=lambda: app.dependency_overrides.get(get_registry, get_registry)(session_factory()),
         reviewer_adapter_factory=lambda: app.dependency_overrides.get(
             get_reviewer_adapter, get_reviewer_adapter
         )(),
         sandbox_manager=sandbox_manager,
         browser_service=browser_service,
+        vault=vault,
     )
     sandbox_manager.scheduler = scheduler
     app.state.scheduler = scheduler

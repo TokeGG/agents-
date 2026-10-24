@@ -231,6 +231,7 @@ def run_task_loop(
     sandbox_manager=None,
     reviewer_adapter: ModelAdapter | None = None,
     browser_service=None,
+    vault=None,
 ) -> None:
     if reviewer_adapter is None:
         reviewer_adapter = worker_adapter
@@ -339,6 +340,7 @@ def run_task_loop(
             scheduler=scheduler,
             sandbox_manager=sandbox_manager,
             browser_service=browser_service,
+            vault=vault,
         )
         try:
             result = tool.run(arguments, ctx)

@@ -16,16 +16,22 @@ from app.agent.tools import (
     edit_file_tool,
     http_get_tool,
     read_file_tool,
+    register_connector_tool,
     report_gap_tool,
+    request_connector_tool,
     run_shell_tool,
+    vault_provision_test_credential_tool,
     write_file_tool,
 )
+from app.connectors.registry import list_active
+from app.connectors.dynamic_tool import DynamicConnectorTool
 from app.db import get_session
 from app.models import Event, Rating, Task
 from app.agent.tools import ToolContext
 from app.browser.service import BrowserService
 from app.sandbox.manager import SandboxManager
 from app.sandbox.runtime import DockerContainerRuntime
+from app.vault import Vault
 from app.schemas import (
     AnswerTaskRequest,
     ApproveTaskRequest,
@@ -58,7 +64,7 @@ def get_reviewer_adapter() -> ModelAdapter:
     )
 
 
-def get_registry() -> ToolRegistry:
+def get_registry(session: Session = Depends(get_session)) -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(http_get_tool)
     registry.register(ask_user_tool)
@@ -71,6 +77,11 @@ def get_registry() -> ToolRegistry:
     registry.register(edit_file_tool)
     registry.register(browse_tool)
     registry.register(download_file_tool)
+    registry.register(request_connector_tool)
+    registry.register(register_connector_tool)
+    registry.register(vault_provision_test_credential_tool)
+    for connector in list_active(session):
+        registry.register(DynamicConnectorTool(connector))
     return registry
 
 
@@ -87,6 +98,18 @@ def get_browser_service() -> BrowserService:
     wiring) so tests can override this via app.dependency_overrides with a
     fake, same lazy-override pattern as get_sandbox_manager/get_registry."""
     return BrowserService()
+
+
+def get_vault(session_factory) -> Vault:
+    """Real (non-test) Vault, backed by VAULT_ENCRYPTION_KEY. Built lazily by
+    callers (lifespan wiring) so tests can override this via
+    app.dependency_overrides with a fake, same lazy-override pattern as
+    get_sandbox_manager/get_browser_service. Fails closed (raises) if the key
+    is unset, matching validate_sandbox_egress_config's precedent."""
+    key = os.environ.get("VAULT_ENCRYPTION_KEY")
+    if not key:
+        raise RuntimeError("VAULT_ENCRYPTION_KEY environment variable is not set")
+    return Vault(key.encode(), session_factory)
 
 
 def get_scheduler(request: Request):
@@ -194,6 +217,7 @@ def approve_task(
                 scheduler=scheduler,
                 sandbox_manager=getattr(scheduler, "sandbox_manager", None),
                 browser_service=getattr(scheduler, "browser_service", None),
+                vault=getattr(scheduler, "vault", None),
             )
             try:
                 result = tool.run(arguments, ctx)
