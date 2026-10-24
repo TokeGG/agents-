@@ -47,6 +47,11 @@ def truncate_output(text: str) -> str:
     return text[:MAX_OUTPUT_CHARS]
 
 
+def build_timeout_command(command: str, timeout: int) -> list[str]:
+    """argv that runs `command` via `sh -c` killed after `timeout` seconds."""
+    return ["timeout", "-k", "5", f"{int(timeout)}s", "sh", "-c", command]
+
+
 class ContainerRuntime(Protocol):
     def create_volume(self, name: str) -> None: ...
 
@@ -63,6 +68,10 @@ class ContainerRuntime(Protocol):
     def exec(self, container_id: str, command: str, timeout: int) -> tuple[int, str]: ...
 
     def stop_container(self, container_id: str) -> None: ...
+
+    def restart_container(self, container_id: str) -> None:
+        """Start a previously stopped (not removed) container again."""
+        ...
 
     def remove_container(self, container_id: str) -> None: ...
 
@@ -99,6 +108,9 @@ class FakeContainerRuntime:
         return container_id
 
     def exec(self, container_id: str, command: str, timeout: int) -> tuple[int, str]:
+        if container_id in self._stopped:
+            # Mirrors Docker: exec against a stopped container fails (409).
+            raise RuntimeError(f"container {container_id} is not running")
         volume_dir = self._containers[container_id]["volume_dir"]
         try:
             proc = subprocess.run(
@@ -115,6 +127,11 @@ class FakeContainerRuntime:
 
     def stop_container(self, container_id: str) -> None:
         self._stopped.add(container_id)
+
+    def restart_container(self, container_id: str) -> None:
+        if container_id not in self._containers:
+            raise RuntimeError(f"no such container {container_id}")
+        self._stopped.discard(container_id)
 
     def remove_container(self, container_id: str) -> None:
         self._containers.pop(container_id, None)
@@ -161,14 +178,22 @@ class DockerContainerRuntime:
         return container.id
 
     def exec(self, container_id: str, command: str, timeout: int) -> tuple[int, str]:
-        # NOTE: docker's exec_run has no native timeout; `timeout` is accepted for protocol parity.
+        # docker's exec_run has no native timeout, so enforce it inside the
+        # container with coreutils `timeout` (SIGTERM, then SIGKILL 5s later).
+        # Exit code 124/137 means the command was killed.
         container = self._client.containers.get(container_id)
-        result = container.exec_run(command, demux=False)
+        wrapped = build_timeout_command(command, timeout)
+        result = container.exec_run(wrapped, demux=False)
+        if result.exit_code in (124, 137):
+            return -1, f"command timed out after {timeout}s"
         output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, bytes) else str(result.output)
         return result.exit_code, truncate_output(output)
 
     def stop_container(self, container_id: str) -> None:
         self._client.containers.get(container_id).stop()
+
+    def restart_container(self, container_id: str) -> None:
+        self._client.containers.get(container_id).start()
 
     def remove_container(self, container_id: str) -> None:
         self._client.containers.get(container_id).remove(force=True)

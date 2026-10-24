@@ -591,3 +591,51 @@ def test_mark_waiting_tasks_interrupted_covers_awaiting_sandbox_slot(db_session,
 
     db_session.expire_all()
     assert db_session.get(Task, tid).status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_killing_task_awaiting_sandbox_slot_is_not_resurrected_by_teardown(db_session, session_factory, tmp_path):
+    from app.sandbox.manager import SandboxManager
+    from app.sandbox.runtime import FakeContainerRuntime, SandboxSlotUnavailable
+
+    holder = make_queued_task(db_session)
+    waiter = make_queued_task(db_session)
+    scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=3)
+    manager = SandboxManager(FakeContainerRuntime(tmp_path), session_factory, scheduler=scheduler, cap=1)
+    scheduler.sandbox_manager = manager
+    manager.get_or_create_container(holder)
+    with pytest.raises(SandboxSlotUnavailable):
+        manager.get_or_create_container(waiter)
+    db_session.get(Task, waiter).status = "awaiting_sandbox_slot"
+    db_session.commit()
+
+    await scheduler.kill_task(waiter)
+    assert waiter not in manager._waiting
+    manager.teardown(holder)
+
+    db_session.expire_all()
+    assert db_session.get(Task, waiter).status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_killing_paused_task_tears_down_sandbox_and_browser(db_session, session_factory):
+    tid = make_queued_task(db_session)
+    db_session.get(Task, tid).status = "awaiting_approval"
+    db_session.commit()
+    torn, closed = [], []
+
+    def failing_teardown(task_id):
+        torn.append(task_id)
+        raise RuntimeError("docker down")
+
+    fake_sandbox = SimpleNamespace(teardown=failing_teardown, remove_waiting=lambda task_id: None)
+    fake_browser = SimpleNamespace(close_context=lambda task_id: closed.append(task_id))
+    scheduler = Scheduler(
+        session_factory, lambda: None, lambda: None, cap=3, sandbox_manager=fake_sandbox, browser_service=fake_browser
+    )
+    await scheduler.kill_task(tid)
+
+    db_session.expire_all()
+    assert db_session.get(Task, tid).status == "interrupted"
+    assert torn == [tid]  # failure in teardown did not stop the kill or browser cleanup
+    assert closed == [tid]

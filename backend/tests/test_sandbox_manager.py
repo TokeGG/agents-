@@ -102,3 +102,105 @@ def test_reap_idle_does_not_reap_recently_paused_task(tmp_path, db_session):
     (tmp_path / manager._volume_name(task.id) / "file.txt").write_text("hello")
     manager.reap_idle(db_session)
     assert runtime.is_stopped(container_id) is False
+
+
+def test_teardown_skips_waiting_task_that_is_already_terminal(tmp_path, db_session):
+    enqueued = []
+    fake_scheduler = SimpleNamespace(enqueue=lambda session, task_id, front: enqueued.append(task_id))
+    manager = SandboxManager(
+        FakeContainerRuntime(tmp_path), session_factory=lambda: db_session, scheduler=fake_scheduler, cap=1
+    )
+    a = Task(description="a", status="running", full_auto=False)
+    dead = Task(description="dead", status="awaiting_sandbox_slot", full_auto=False)
+    live = Task(description="live", status="awaiting_sandbox_slot", full_auto=False)
+    db_session.add_all([a, dead, live]); db_session.commit()
+    manager.get_or_create_container(a.id)
+    for t in (dead, live):
+        with pytest.raises(SandboxSlotUnavailable):
+            manager.get_or_create_container(t.id)
+    dead.status = "interrupted"; db_session.commit()
+    manager.teardown(a.id)
+    assert enqueued == [live.id]
+
+
+def test_fake_runtime_exec_fails_on_stopped_container(tmp_path):
+    runtime = FakeContainerRuntime(base_dir=tmp_path)
+    manager = SandboxManager(runtime, session_factory=None, cap=1)
+    cid = manager.get_or_create_container(1)
+    runtime.stop_container(cid)
+    with pytest.raises(RuntimeError):
+        runtime.exec(cid, "true", timeout=5)
+
+
+def test_reaped_container_is_restarted_and_usable(tmp_path, db_session):
+    runtime = FakeContainerRuntime(base_dir=tmp_path)
+    manager = SandboxManager(runtime, session_factory=lambda: db_session, cap=1, idle_timeout_seconds=0)
+    task = Task(description="x", status="awaiting_answer", full_auto=False)
+    db_session.add(task); db_session.commit()
+    cid = manager.get_or_create_container(task.id)
+    manager.write_file(task.id, "f.txt", "kept")
+    manager.reap_idle(db_session)
+    assert runtime.is_stopped(cid)
+    # a second sweep must not touch the already-stopped container
+    manager.reap_idle(db_session)
+    task.status = "running"; db_session.commit()
+    assert manager.get_or_create_container(task.id) == cid
+    assert runtime.is_stopped(cid) is False
+    result = manager.read_file(task.id, "f.txt")
+    assert result["ok"] and "kept" in result["output"]
+
+
+def test_reaped_container_frees_slot_and_restart_respects_cap(tmp_path, db_session):
+    runtime = FakeContainerRuntime(base_dir=tmp_path)
+    manager = SandboxManager(runtime, session_factory=lambda: db_session, cap=1, idle_timeout_seconds=0)
+    a = Task(description="a", status="awaiting_answer", full_auto=False)
+    b = Task(description="b", status="running", full_auto=False)
+    db_session.add_all([a, b]); db_session.commit()
+    manager.get_or_create_container(a.id)
+    manager.reap_idle(db_session)
+    manager.get_or_create_container(b.id)  # slot freed by reap
+    with pytest.raises(SandboxSlotUnavailable):
+        manager.get_or_create_container(a.id)
+    assert a.id in manager._waiting
+
+
+def test_cap_respected_under_concurrent_get_or_create(tmp_path):
+    import threading
+    import time as _time
+
+    class SlowRuntime(FakeContainerRuntime):
+        def __init__(self, base_dir):
+            super().__init__(base_dir)
+            self.live = 0
+            self.max_live = 0
+            self._m = threading.Lock()
+
+        def start_container(self, *args, **kwargs):
+            with self._m:
+                self.live += 1
+                self.max_live = max(self.max_live, self.live)
+            _time.sleep(0.05)
+            return super().start_container(*args, **kwargs)
+
+    runtime = SlowRuntime(tmp_path)
+    manager = SandboxManager(runtime, session_factory=None, cap=2)
+    barrier = threading.Barrier(8)
+    results = {}
+
+    def worker(tid):
+        barrier.wait()
+        try:
+            manager.get_or_create_container(tid)
+            results[tid] = "ok"
+        except SandboxSlotUnavailable:
+            results[tid] = "wait"
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert list(results.values()).count("ok") == 2
+    assert len(manager._slots) == 2
+    assert runtime.max_live == 2
+    assert sorted(manager._waiting) == sorted(t for t, r in results.items() if r == "wait")

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -76,18 +77,31 @@ def run_startup_recovery(session_factory) -> None:
         session.close()
 
 
+logger = logging.getLogger(__name__)
+
 REAPER_POLL_INTERVAL_SECONDS = 60
 
 
 async def _run_idle_reaper(sandbox_manager, session_factory) -> None:
     while True:
         await asyncio.sleep(REAPER_POLL_INTERVAL_SECONDS)
-        session = session_factory()
         try:
-            sandbox_manager.reap_idle(session)
-        finally:
-            if session is not None and hasattr(session, "close"):
-                session.close()
+            await asyncio.to_thread(_reap_once, sandbox_manager, session_factory)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # One bad sweep must not kill the background reaper.
+            logger.exception("idle reaper sweep failed; will retry next interval")
+
+
+def _reap_once(sandbox_manager, session_factory) -> None:
+    # Session is created and used entirely on the worker thread.
+    session = session_factory()
+    try:
+        sandbox_manager.reap_idle(session)
+    finally:
+        if session is not None and hasattr(session, "close"):
+            session.close()
 
 
 @asynccontextmanager

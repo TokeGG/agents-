@@ -170,19 +170,40 @@ class Scheduler:
                     for tid in collect_descendant_ids(session, root_id):
                         if tid not in ids:
                             ids.append(tid)
-                self._mark_waiting_tasks_interrupted(session, ids)
+                flipped = self._mark_waiting_tasks_interrupted(session, ids)
             finally:
                 session.close()
+            await self._release_resources_for_killed_waiting(flipped)
             await self._interrupt_and_wait(ids)
 
     def _collect_descendant_ids(self, session: Session, task_id: int) -> list[int]:
         return collect_descendant_ids(session, task_id)
 
-    def _mark_waiting_tasks_interrupted(self, session: Session, ids) -> None:
+    async def _release_resources_for_killed_waiting(self, task_ids) -> None:
+        """Tasks killed while parked (no _run_one running them) never reach
+        _run_one's finally-block teardown, so release their sandbox
+        container/slot and browser context here. Best-effort, off the event
+        loop, same discipline as _run_one's teardown blocks."""
+        for task_id in task_ids:
+            if self.sandbox_manager is not None:
+                try:
+                    await asyncio.to_thread(self.sandbox_manager.teardown, task_id)
+                except Exception:
+                    logger.exception("sandbox teardown failed for killed task %s", task_id)
+            if self.browser_service is not None:
+                try:
+                    await asyncio.to_thread(self.browser_service.close_context, task_id)
+                except Exception:
+                    logger.exception("browser context teardown failed for killed task %s", task_id)
+
+    def _mark_waiting_tasks_interrupted(self, session: Session, ids) -> list[int]:
         """For ids with no live interrupt_event (nothing currently running
         them), directly interrupt any that are still queued or parked
         waiting on the user/a subtask, under the same lock enqueue()/
-        _pop_next() use, so the scheduler can never pop one of these later."""
+        _pop_next() use, so the scheduler can never pop one of these later.
+        Also drops each from the sandbox slot wait queue so a later teardown
+        can't re-enqueue (resurrect) it. Returns the ids it interrupted."""
+        flipped: list[int] = []
         with self._lock:
             for task_id in ids:
                 if task_id in self._interrupt_events:
@@ -190,6 +211,9 @@ class Scheduler:
                 task = session.get(Task, task_id)
                 if task is not None and task.status in WAITING_STATUSES:
                     task.status = "interrupted"
+                    flipped.append(task_id)
+                    if self.sandbox_manager is not None and hasattr(self.sandbox_manager, "remove_waiting"):
+                        self.sandbox_manager.remove_waiting(task_id)
                     session.add(
                         Event(
                             task_id=task_id,
@@ -201,6 +225,7 @@ class Scheduler:
                         )
                     )
             session.commit()
+        return flipped
 
     async def _interrupt_and_wait(self, ids) -> None:
         """Signals the interrupt_event of every id in `ids` that currently
