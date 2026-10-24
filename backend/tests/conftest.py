@@ -18,6 +18,16 @@ def _shared_sqlite_engine():
     )
 
 
+@pytest.fixture(autouse=True)
+def _default_sandbox_egress_allowlist(monkeypatch):
+    """The app now fails closed at startup (lifespan) when
+    SANDBOX_EGRESS_ALLOWLIST is unset/empty. Default it here so existing
+    tests that spin up a TestClient (triggering lifespan) don't all need to
+    set it themselves; a test that wants to exercise the unset/empty case
+    uses monkeypatch.delenv/setenv itself to override this default."""
+    monkeypatch.setenv("SANDBOX_EGRESS_ALLOWLIST", "api.example.com")
+
+
 @pytest.fixture()
 def db_session(session_factory):
     session = session_factory()

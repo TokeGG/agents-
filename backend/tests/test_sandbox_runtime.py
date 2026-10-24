@@ -40,3 +40,30 @@ def test_docker_runtime_start_container_passes_resource_limits(monkeypatch):
     assert kwargs["network"] == "sandbox-net"
     assert kwargs["volumes"] == {"vol-3": {"bind": "/workspace", "mode": "rw"}}
     assert kwargs["working_dir"] == "/workspace"
+
+
+def test_validate_sandbox_egress_config_raises_when_unset(monkeypatch):
+    import pytest as _pytest
+
+    from app.sandbox.runtime import validate_sandbox_egress_config
+
+    monkeypatch.delenv("SANDBOX_EGRESS_ALLOWLIST", raising=False)
+    with _pytest.raises(RuntimeError):
+        validate_sandbox_egress_config()
+
+
+def test_validate_sandbox_egress_config_raises_when_empty(monkeypatch):
+    import pytest as _pytest
+
+    from app.sandbox.runtime import validate_sandbox_egress_config
+
+    monkeypatch.setenv("SANDBOX_EGRESS_ALLOWLIST", "")
+    with _pytest.raises(RuntimeError):
+        validate_sandbox_egress_config()
+
+
+def test_validate_sandbox_egress_config_passes_when_set(monkeypatch):
+    from app.sandbox.runtime import validate_sandbox_egress_config
+
+    monkeypatch.setenv("SANDBOX_EGRESS_ALLOWLIST", "api.example.com,pypi.org")
+    validate_sandbox_egress_config()

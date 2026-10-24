@@ -7,6 +7,7 @@ Two implementations share one protocol:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import uuid
@@ -15,9 +16,31 @@ from typing import Protocol
 
 MAX_OUTPUT_CHARS = 4000
 
+SANDBOX_EGRESS_ALLOWLIST_ENV_VAR = "SANDBOX_EGRESS_ALLOWLIST"
+
 
 class SandboxSlotUnavailable(Exception):
     """Raised when no sandbox container slot can be allocated."""
+
+
+def validate_sandbox_egress_config() -> None:
+    """Fail closed at startup if the operator hasn't configured an explicit
+    network egress allowlist for sandbox containers.
+
+    Sandboxed execution is always-on in this deployment (there is no feature
+    flag gating it), so this must be checked unconditionally whenever the app
+    starts, before anything else starts up. Without an explicit allowlist, a
+    misconfigured deployment would otherwise allow unrestricted network
+    egress from inside sandboxes.
+    """
+    value = os.environ.get(SANDBOX_EGRESS_ALLOWLIST_ENV_VAR, "")
+    if not value.strip():
+        raise RuntimeError(
+            f"{SANDBOX_EGRESS_ALLOWLIST_ENV_VAR} is unset or empty. Refusing to start: "
+            "sandbox container network egress must be restricted to an explicit allowlist "
+            f"of hosts. Set {SANDBOX_EGRESS_ALLOWLIST_ENV_VAR} to a comma-separated list of "
+            "allowed hosts before starting this app."
+        )
 
 
 def truncate_output(text: str) -> str:

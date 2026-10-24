@@ -16,6 +16,7 @@ from app.api.tasks import (
 )
 from app.db import get_session_factory
 from app.models import Event, Task
+from app.sandbox.runtime import validate_sandbox_egress_config
 from app.scheduler import WAITING_STATUSES, Scheduler, collect_descendant_ids
 
 RESTART_REPORT_GAP_REASON = (
@@ -91,6 +92,7 @@ async def _run_idle_reaper(sandbox_manager, session_factory) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_sandbox_egress_config()
     session_factory = lambda: app.dependency_overrides.get(get_session_factory, get_session_factory)()()
     sandbox_manager = app.dependency_overrides.get(get_sandbox_manager, get_sandbox_manager)(session_factory)
     browser_service = app.dependency_overrides.get(get_browser_service, get_browser_service)()
