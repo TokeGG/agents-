@@ -617,6 +617,24 @@ async def test_killing_task_awaiting_sandbox_slot_is_not_resurrected_by_teardown
     assert db_session.get(Task, waiter).status == "interrupted"
 
 
+def test_enqueue_does_not_resurrect_a_terminal_task(db_session, session_factory):
+    # Regression for a narrow race found in final-branch review: a wake-up
+    # path (e.g. SandboxManager.teardown re-enqueueing a slot waiter) can
+    # read a task's status before a concurrent kill flips it to terminal,
+    # then call enqueue() after the kill already committed. enqueue() must
+    # not overwrite that terminal status with "queued".
+    task_id = make_queued_task(db_session)
+    task = db_session.get(Task, task_id)
+    task.status = "interrupted"
+    db_session.commit()
+
+    scheduler = Scheduler(session_factory, lambda: None, lambda: None, cap=3)
+    scheduler.enqueue(db_session, task_id, front=True)
+
+    db_session.expire_all()
+    assert db_session.get(Task, task_id).status == "interrupted"
+
+
 @pytest.mark.asyncio
 async def test_killing_paused_task_tears_down_sandbox_and_browser(db_session, session_factory):
     tid = make_queued_task(db_session)

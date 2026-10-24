@@ -466,6 +466,14 @@ class Scheduler:
             task = session.get(Task, task_id)
             if task is None:
                 return
+            session.refresh(task)
+            if task.status in ("completed", "failed", "interrupted"):
+                # A task can reach enqueue() via a wake-up path (e.g. a
+                # sandbox slot freeing up) after a concurrent kill already
+                # flipped it to a terminal status under this same lock —
+                # don't resurrect it by overwriting that status with
+                # "queued".
+                return
             if front:
                 min_pos = session.query(func.min(Task.queue_position)).filter(
                     Task.status == "queued"
