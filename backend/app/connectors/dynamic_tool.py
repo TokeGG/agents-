@@ -18,11 +18,13 @@ Security-critical invariants:
 from __future__ import annotations
 
 import json
+import shlex
 import uuid
 
 from app.agent.tools import _NO_SANDBOX_RESULT
 from app.connectors.registry import Connector
 from app.connectors.secret_injection import provision_secret_file, redact_secret
+
 
 def _quote(value: str) -> str:
     """Shell-quote a string for safe inclusion in a `sh -c`-style command."""
@@ -76,7 +78,10 @@ class DynamicConnectorTool:
         if vault is not None:
             secret = vault.get(self.connector.service_name)
             if secret is not None:
-                secret_path = provision_secret_file(sandbox_manager, task_id, secret)
+                try:
+                    secret_path = provision_secret_file(sandbox_manager, task_id, secret)
+                except RuntimeError as exc:
+                    return {"ok": False, "output": f"failed to provision credential: {exc}", "data": None}
 
         invocation = f"python3 {_quote(connector_path)}"
         if secret_path is not None:
@@ -86,30 +91,58 @@ class DynamicConnectorTool:
         payload = json.dumps(arguments)
         command = f"{invocation} << '{marker}'\n{payload}\n{marker}\n"
         if secret_path is not None:
-            # Capture the real exit code of the invocation before removing
-            # the secret file, so the secret is shredded unconditionally
+            # First line of defense: capture the real exit code of the
+            # invocation before removing the secret file, so the secret is
+            # shredded unconditionally within the same shell session
             # (whether the script succeeds, fails, or crashes) while the
             # result returned below still reflects the script's own
-            # success/failure, not `rm`'s.
+            # success/failure, not `rm`'s. This alone is not sufficient: a
+            # command timeout kills the whole `sh -c` session (including
+            # this `rm -f`) before it runs, and `run_shell` itself can raise
+            # (e.g. a stopped container) after the secret file was already
+            # written. The `finally` block below is the second, independent
+            # line of defense that covers exactly those cases.
             command += f"\nrc=$?\nrm -f {_quote(secret_path)}\nexit $rc\n"
 
-        exec_result = sandbox_manager.run_shell(task_id, command)
+        try:
+            exec_result = sandbox_manager.run_shell(task_id, command)
+        finally:
+            if secret_path is not None:
+                self._best_effort_shred(sandbox_manager, task_id, secret_path)
 
         if not exec_result["ok"]:
             output = redact_secret(exec_result["output"], secret)
             return {"ok": False, "output": output, "data": None}
 
         raw_output = exec_result["output"]
+        # Redact the raw JSON text before parsing, not just result["output"]
+        # after parsing: a connector could echo the secret into ANY field
+        # (e.g. "data"), and the model sees the whole parsed result, not
+        # just "output".
+        redacted_output = redact_secret(raw_output, secret)
         try:
-            parsed = json.loads(raw_output)
+            parsed = json.loads(redacted_output)
         except json.JSONDecodeError:
-            output = redact_secret(raw_output, secret)
-            return {"ok": False, "output": output, "data": None}
+            return {"ok": False, "output": redacted_output, "data": None}
 
         if not isinstance(parsed, dict):
-            output = redact_secret(raw_output, secret)
-            return {"ok": False, "output": output, "data": None}
+            return {"ok": False, "output": redacted_output, "data": None}
 
-        result = dict(parsed)
-        result["output"] = redact_secret(result.get("output", ""), secret)
-        return result
+        return parsed
+
+    @staticmethod
+    def _best_effort_shred(sandbox_manager, task_id: int, secret_path: str) -> None:
+        """Defense-in-depth cleanup for the secret file, run as a SEPARATE
+        `run_shell` call outside the (possibly timed-out or already-failed)
+        invocation command. Covers the cases the in-shell `rm -f` cannot:
+        a command timeout kills the whole shell session before its `rm -f`
+        runs, and `run_shell` itself can raise after the secret file was
+        already written (e.g. a stopped container, a Docker API error).
+        Any error here is swallowed: this is cleanup, not the primary
+        success/failure path, and must never mask or replace the real
+        result/exception from the invocation itself.
+        """
+        try:
+            sandbox_manager.run_shell(task_id, f"rm -f {shlex.quote(secret_path)}")
+        except Exception:
+            pass

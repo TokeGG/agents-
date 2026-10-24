@@ -94,7 +94,7 @@ def test_vault_provision_test_credential_present_and_absent(tmp_path, db_session
     present = vault_provision_test_credential_tool.run({"service_name": "github"}, ctx)
     assert present["ok"] is True
     assert "ghp_abc123" not in present["output"]
-    assert present["data"]["path"].startswith("/secrets/")
+    assert present["data"]["path"].startswith("secrets/")
 
     absent = vault_provision_test_credential_tool.run({"service_name": "slack"}, ctx)
     assert absent["ok"] is True

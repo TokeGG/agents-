@@ -7,7 +7,7 @@ def test_provision_secret_file_writes_and_returns_path(tmp_path, db_session, tas
     manager = SandboxManager(FakeContainerRuntime(tmp_path), session_factory=lambda: db_session, cap=2)
     manager.get_or_create_container(task.id)
     path = provision_secret_file(manager, task.id, "s3cr3t-value")
-    assert path.startswith("/secrets/")
+    assert path.startswith("secrets/")
     result = manager.read_file(task.id, path)
     assert result["output"].strip() == "s3cr3t-value"
 
