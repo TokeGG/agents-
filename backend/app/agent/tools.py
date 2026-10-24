@@ -8,6 +8,8 @@ import httpx
 from playwright.sync_api import Error as PlaywrightError
 from sqlalchemy.orm import Session
 
+from app.connectors.registry import create_pending, find_active, find_pending
+from app.connectors.secret_injection import provision_secret_file
 from app.models import Event, Task
 from app.sandbox.runtime import truncate_output
 
@@ -19,6 +21,7 @@ class ToolContext:
     scheduler: object | None = None
     sandbox_manager: object | None = None
     browser_service: object | None = None
+    vault: object | None = None
 
 
 class Tool(Protocol):
@@ -396,3 +399,144 @@ class _DownloadFileTool:
 
 
 download_file_tool = _DownloadFileTool()
+
+
+class _RequestConnectorTool:
+    name = "request_connector"
+    description = (
+        "Request a connector (a small tool integrating an external service). "
+        "Reuses an existing active or pending connector for the same service/purpose "
+        "if one exists, otherwise delegates a background coding subtask to build one."
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "service_name": {"type": "string"},
+            "purpose": {"type": "string"},
+        },
+        "required": ["service_name", "purpose"],
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        service_name = arguments["service_name"]
+        purpose = arguments["purpose"]
+
+        active = find_active(ctx.session, service_name, purpose)
+        if active is not None:
+            return {
+                "ok": True,
+                "output": f"connector '{active.name}' already active for {service_name}",
+                "data": {"connector_name": active.name},
+            }
+
+        pending = find_pending(ctx.session, service_name)
+        if pending is not None:
+            return {
+                "ok": True,
+                "output": f"a connector for {service_name} is already awaiting approval",
+                "data": None,
+            }
+
+        forge_brief = (
+            f"Build and sandbox-test an integration for the service '{service_name}'. "
+            f"Purpose: {purpose}. Use vault_provision_test_credential('{service_name}') to "
+            "get a credential file path if one exists (read it by path, never hardcode a "
+            "value). Write a single Python module exposing a function with the shape "
+            "(name, description, parameters_schema, and a callable entry point reading JSON "
+            "arguments from stdin and printing a JSON {'ok','output','data'} result to "
+            "stdout). When it passes its own test, call register_connector(...) with that "
+            "module's source as source_code. If no credential exists, test against a stub "
+            "you write yourself and call report_gap with options to add a credential to the "
+            "vault and retry."
+        )
+        return delegate_task_tool.run(
+            {"description": forge_brief, "mode": "background", "agent_type": "coding"}, ctx
+        )
+
+
+request_connector_tool = _RequestConnectorTool()
+
+
+class _RegisterConnectorTool:
+    name = "register_connector"
+    description = "Register a newly built connector for human approval."
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "service_name": {"type": "string"},
+            "purpose": {"type": "string"},
+            "parameters_schema": {"type": "object"},
+            "source_code": {"type": "string"},
+            "required_hosts": {"type": "array", "items": {"type": "string"}},
+            "test_transcript": {"type": "object"},
+        },
+        "required": [
+            "name",
+            "service_name",
+            "purpose",
+            "parameters_schema",
+            "source_code",
+            "required_hosts",
+            "test_transcript",
+        ],
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        row = create_pending(
+            ctx.session,
+            name=arguments["name"],
+            service_name=arguments["service_name"],
+            purpose=arguments["purpose"],
+            parameters_schema=arguments["parameters_schema"],
+            source_code=arguments["source_code"],
+            required_hosts=arguments["required_hosts"],
+            requested_by_task_id=ctx.task_id,
+            test_transcript=arguments["test_transcript"],
+        )
+        return {
+            "ok": True,
+            "output": f"connector '{row.name}' registered, pending review",
+            "data": {"connector_id": row.id},
+        }
+
+
+register_connector_tool = _RegisterConnectorTool()
+
+
+class _VaultProvisionTestCredentialTool:
+    name = "vault_provision_test_credential"
+    description = (
+        "Provision a vault-stored credential for a service into the task's sandbox "
+        "as a file, returning its path (never the raw secret value)."
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {"service_name": {"type": "string"}},
+        "required": ["service_name"],
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> dict:
+        service_name = arguments["service_name"]
+        if ctx.vault is None:
+            return {
+                "ok": True,
+                "output": f"no credential configured for {service_name}",
+                "data": {"path": None},
+            }
+        secret = ctx.vault.get(service_name)
+        if secret is None:
+            return {
+                "ok": True,
+                "output": f"no credential configured for {service_name}",
+                "data": {"path": None},
+            }
+        path = provision_secret_file(ctx.sandbox_manager, ctx.task_id, secret)
+        return {
+            "ok": True,
+            "output": f"credential available at {path}",
+            "data": {"path": path},
+        }
+
+
+vault_provision_test_credential_tool = _VaultProvisionTestCredentialTool()
