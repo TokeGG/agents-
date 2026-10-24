@@ -538,6 +538,84 @@ async def test_run_one_forwards_configured_vault_to_run_fn(db_session, session_f
 
 
 @pytest.mark.asyncio
+async def test_run_one_forwards_configured_vault_to_run_fn_via_to_thread_branch(db_session, session_factory):
+    """Same as test_run_one_forwards_configured_vault_to_run_fn, but with a
+    SYNC run_fn (a plain `def`, not `async def`), so this exercises
+    _run_one's OTHER call-site branch: `await asyncio.to_thread(self.run_fn,
+    ...)`. The real production run_fn (run_task_loop) is sync, so this is
+    the branch real task runs actually take -- the async-test-double branch
+    the sibling test above exercises is only used by async test doubles.
+    This is exactly the gap that let sandbox_manager/browser_service
+    forwarding bugs slip through undetected earlier in this codebase's
+    history: both call sites must be checked, not just one."""
+    fake_vault = SimpleNamespace(get=lambda service_name: None)
+    seen = {}
+
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None, browser_service=None, vault=None):
+        seen["vault"] = vault
+        t = session.get(Task, task_id)
+        t.status = "completed"
+        session.commit()
+
+    scheduler = Scheduler(
+        session_factory, lambda: None, lambda: None, cap=1, run_fn=fake_run, vault=fake_vault
+    )
+    task_id = make_queued_task(session_factory())
+    await scheduler._run_one(task_id, threading.Event())
+    assert seen["vault"] is fake_vault
+
+
+@pytest.mark.asyncio
+async def test_run_one_forwards_configured_sandbox_manager_to_run_fn_via_to_thread_branch(
+    db_session, session_factory
+):
+    """Same as test_run_one_forwards_configured_sandbox_manager_to_run_fn,
+    but with a SYNC run_fn, exercising _run_one's `asyncio.to_thread`
+    branch -- the branch the real run_task_loop actually takes in
+    production. Closes the async-only gap in the original test."""
+    fake_sandbox = SimpleNamespace(teardown=lambda task_id: None)
+    seen = {}
+
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None, browser_service=None, vault=None):
+        seen["sandbox_manager"] = sandbox_manager
+        t = session.get(Task, task_id)
+        t.status = "completed"
+        session.commit()
+
+    scheduler = Scheduler(
+        session_factory, lambda: None, lambda: None, cap=1, run_fn=fake_run, sandbox_manager=fake_sandbox
+    )
+    task_id = make_queued_task(session_factory())
+    await scheduler._run_one(task_id, threading.Event())
+    assert seen["sandbox_manager"] is fake_sandbox
+
+
+@pytest.mark.asyncio
+async def test_run_one_forwards_configured_browser_service_to_run_fn_via_to_thread_branch(
+    db_session, session_factory
+):
+    """Same as test_run_one_forwards_configured_browser_service_to_run_fn,
+    but with a SYNC run_fn, exercising _run_one's `asyncio.to_thread`
+    branch -- the branch the real run_task_loop actually takes in
+    production. Closes the async-only gap in the original test."""
+    fake_browser_service = SimpleNamespace(close_context=lambda task_id: None)
+    seen = {}
+
+    def fake_run(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None, browser_service=None, vault=None):
+        seen["browser_service"] = browser_service
+        t = session.get(Task, task_id)
+        t.status = "completed"
+        session.commit()
+
+    scheduler = Scheduler(
+        session_factory, lambda: None, lambda: None, cap=1, run_fn=fake_run, browser_service=fake_browser_service
+    )
+    task_id = make_queued_task(session_factory())
+    await scheduler._run_one(task_id, threading.Event())
+    assert seen["browser_service"] is fake_browser_service
+
+
+@pytest.mark.asyncio
 async def test_run_one_still_calls_on_task_terminal_when_teardown_raises(db_session, session_factory):
     """If sandbox_manager.teardown() blows up (e.g. Docker daemon down, or
     the container was already removed), _run_one must still call

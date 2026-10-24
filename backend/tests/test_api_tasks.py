@@ -1,24 +1,50 @@
 import time
 
+import pytest
+
 from app.agent.model_adapter import FakeModelAdapter
 from app.api import tasks as tasks_module
-from app.api.tasks import get_registry
+from app.api.tasks import get_registry, get_vault
 from app.connectors.registry import approve
 from app.models import Connector
 
 
+def test_get_vault_raises_when_encryption_key_unset(monkeypatch, session_factory):
+    monkeypatch.delenv("VAULT_ENCRYPTION_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        get_vault(session_factory)
+
+
 def test_get_registry_loads_active_connectors(db_session, task):
-    from app.connectors.registry import create_pending
+    from app.connectors.registry import create_pending, reject
 
     create_pending(
         db_session, name="github_create_issue", service_name="github", purpose="x",
         parameters_schema={"type": "object"}, source_code="print('hi')",
         required_hosts=[], requested_by_task_id=task.id, test_transcript={},
     )
-    approve(db_session, db_session.query(Connector).one().id, approved_by="user")
+    active_id = db_session.query(Connector).filter_by(name="github_create_issue").one().id
+    approve(db_session, active_id, approved_by="user")
+
+    create_pending(
+        db_session, name="still_pending_tool", service_name="other", purpose="x",
+        parameters_schema={"type": "object"}, source_code="print('hi')",
+        required_hosts=[], requested_by_task_id=task.id, test_transcript={},
+    )
+
+    create_pending(
+        db_session, name="rejected_tool", service_name="another", purpose="x",
+        parameters_schema={"type": "object"}, source_code="print('hi')",
+        required_hosts=[], requested_by_task_id=task.id, test_transcript={},
+    )
+    rejected_id = db_session.query(Connector).filter_by(name="rejected_tool").one().id
+    reject(db_session, rejected_id)
+
     registry = get_registry(session=db_session)
     assert registry.get("github_create_issue") is not None
     assert registry.get("github_create_issue").name == "github_create_issue"
+    assert registry.get("still_pending_tool") is None
+    assert registry.get("rejected_tool") is None
 
 
 def wait_for_status(client, task_id, *statuses, timeout=10.0):

@@ -78,6 +78,27 @@ def run_startup_recovery(session_factory) -> None:
         session.close()
 
 
+def _build_registry(app: FastAPI, session_factory):
+    """Calls get_registry (or its override) with a fresh, short-lived
+    session, closing it before returning. get_registry() queries
+    list_active(session) and wraps each row in a DynamicConnectorTool,
+    whose __init__ copies out .name/.description/.parameters_schema
+    immediately; DynamicConnectorTool.run() later reads
+    self.connector.source_code/service_name, but those columns are already
+    loaded on the Connector instance by the same query that loaded
+    list_active's rows, so they remain readable on the detached instance
+    after this session is closed -- no attribute here is lazily loaded
+    after the fact. Closing promptly here (rather than leaving the session
+    open for the registry's lifetime, which the Scheduler's own
+    per-task-fresh lambda -- not a FastAPI request -- has no other
+    mechanism to close) avoids leaking a connection per task run."""
+    session = session_factory()
+    try:
+        return app.dependency_overrides.get(get_registry, get_registry)(session)
+    finally:
+        session.close()
+
+
 logger = logging.getLogger(__name__)
 
 REAPER_POLL_INTERVAL_SECONDS = 60
@@ -115,7 +136,7 @@ async def lifespan(app: FastAPI):
     scheduler = Scheduler(
         session_factory=session_factory,
         adapter_factory=lambda: app.dependency_overrides.get(get_adapter, get_adapter)(),
-        registry_factory=lambda: app.dependency_overrides.get(get_registry, get_registry)(session_factory()),
+        registry_factory=lambda: _build_registry(app, session_factory),
         reviewer_adapter_factory=lambda: app.dependency_overrides.get(
             get_reviewer_adapter, get_reviewer_adapter
         )(),
