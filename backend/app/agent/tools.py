@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import httpx
+from playwright.sync_api import Error as PlaywrightError
 from sqlalchemy.orm import Session
 
 from app.models import Event, Task
@@ -350,11 +351,10 @@ class _BrowseTool:
     def run(self, arguments: dict, ctx: ToolContext) -> dict:
         if ctx.browser_service is None:
             return _NO_BROWSER_RESULT
-        context = ctx.browser_service.get_or_create_context(ctx.task_id)
-        page = context.new_page()
-        page.goto(arguments["url"])
-        title = page.title()
-        text = page.inner_text("body")
+        try:
+            title, text = ctx.browser_service.navigate(ctx.task_id, arguments["url"])
+        except PlaywrightError as exc:
+            return {"ok": False, "output": f"browse failed: {exc}", "data": None}
         return {"ok": True, "output": truncate_output(f"{title}\n{text}"), "data": None}
 
 
@@ -376,9 +376,10 @@ class _DownloadFileTool:
     def run(self, arguments: dict, ctx: ToolContext) -> dict:
         if ctx.browser_service is None or ctx.sandbox_manager is None:
             return _NO_BROWSER_RESULT
-        context = ctx.browser_service.get_or_create_context(ctx.task_id)
-        response = context.request.get(arguments["url"])
-        body = response.body()
+        try:
+            body = ctx.browser_service.download(ctx.task_id, arguments["url"])
+        except PlaywrightError as exc:
+            return {"ok": False, "output": f"download failed: {exc}", "data": None}
         # `SandboxManager.write_file` takes a string (Task 2's signature); downloaded
         # content is arbitrary bytes, so it is base64-encoded here and decoded on the
         # shell side via `base64 -d`, rather than extending write_file to accept

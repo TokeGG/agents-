@@ -395,6 +395,80 @@ async def test_run_one_does_not_tear_down_sandbox_on_pause(db_session, session_f
 
 
 @pytest.mark.asyncio
+async def test_run_one_tears_down_browser_context_only_on_terminal_status(db_session, session_factory):
+    teardown_calls = []
+    fake_browser_service = SimpleNamespace(close_context=lambda task_id: teardown_calls.append(task_id))
+
+    async def fake_run_completes(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None, browser_service=None):
+        t = session.get(Task, task_id)
+        t.status = "completed"
+        session.commit()
+
+    scheduler = Scheduler(
+        session_factory, lambda: None, lambda: None, cap=1, run_fn=fake_run_completes, browser_service=fake_browser_service
+    )
+    task_id = make_queued_task(session_factory())
+    await scheduler._run_one(task_id, threading.Event())
+    assert teardown_calls == [task_id]
+
+
+@pytest.mark.asyncio
+async def test_run_one_does_not_tear_down_browser_context_on_pause(db_session, session_factory):
+    teardown_calls = []
+    fake_browser_service = SimpleNamespace(close_context=lambda task_id: teardown_calls.append(task_id))
+
+    async def fake_run_pauses(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None, browser_service=None):
+        t = session.get(Task, task_id)
+        t.status = "awaiting_answer"
+        session.commit()
+
+    scheduler = Scheduler(
+        session_factory, lambda: None, lambda: None, cap=1, run_fn=fake_run_pauses, browser_service=fake_browser_service
+    )
+    task_id = make_queued_task(session_factory())
+    await scheduler._run_one(task_id, threading.Event())
+    assert teardown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_one_still_calls_on_task_terminal_when_browser_teardown_raises(db_session, session_factory):
+    """If browser_service.close_context() blows up (e.g. the browser process
+    already gone), _run_one must still call _on_task_terminal -- otherwise a
+    parent task parked in "awaiting_subtask" would never get resumed just
+    because teardown failed."""
+
+    def raising_close_context(task_id):
+        raise RuntimeError("browser process unreachable")
+
+    fake_browser_service = SimpleNamespace(close_context=raising_close_context)
+
+    async def fake_run_completes(task_id, session, adapter, registry, scheduler=None, interrupt_event=None, sandbox_manager=None, reviewer_adapter=None, browser_service=None):
+        t = session.get(Task, task_id)
+        t.status = "completed"
+        session.commit()
+
+    scheduler = Scheduler(
+        session_factory, lambda: None, lambda: None, cap=1, run_fn=fake_run_completes, browser_service=fake_browser_service
+    )
+
+    parent = Task(description="parent", status="awaiting_subtask", full_auto=False)
+    db_session.add(parent)
+    db_session.commit()
+    child = Task(description="child", status="queued", full_auto=False, parent_task_id=parent.id)
+    db_session.add(child)
+    db_session.commit()
+    child_id = child.id
+
+    # Must not raise despite close_context() blowing up.
+    await scheduler._run_one(child_id, threading.Event())
+
+    db_session.expire_all()
+    refreshed_parent = db_session.get(Task, parent.id)
+    assert refreshed_parent.status == "queued"
+    assert refreshed_parent.queue_position is not None
+
+
+@pytest.mark.asyncio
 async def test_run_one_forwards_configured_sandbox_manager_to_run_fn(db_session, session_factory):
     """A real run through _run_one must hand run_fn (run_task_loop in
     production) the Scheduler's actual configured sandbox_manager, not

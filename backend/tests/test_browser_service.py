@@ -1,3 +1,6 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 from app.browser.service import BrowserService
 
 
@@ -62,3 +65,38 @@ def test_close_context_removes_cached_context(monkeypatch):
 
     ctx2 = service.get_or_create_context(task_id=1)
     assert ctx2 is not ctx1
+
+
+def test_all_playwright_calls_run_on_single_internal_thread(monkeypatch):
+    """Calls arriving from different Python threads must all actually be
+    executed on BrowserService's one dedicated worker thread -- Playwright's
+    sync API is not thread-safe and breaks if its objects are touched from
+    more than one thread."""
+    service = BrowserService()
+    fake_browser = _FakeBrowser()
+    monkeypatch.setattr(service, "_ensure_browser", lambda: fake_browser)
+
+    seen_thread_ids: list[int] = []
+    lock = threading.Lock()
+
+    # Wrap the real impl to record the thread id it actually executes on,
+    # while still doing real work.
+    original_impl = service._get_or_create_context_impl
+
+    def recording_impl(task_id):
+        with lock:
+            seen_thread_ids.append(threading.get_ident())
+        return original_impl(task_id)
+
+    monkeypatch.setattr(service, "_get_or_create_context_impl", recording_impl)
+
+    callers = ThreadPoolExecutor(max_workers=8)
+    futures = [
+        callers.submit(service.get_or_create_context, task_id=i % 3) for i in range(20)
+    ]
+    for f in futures:
+        f.result()
+    callers.shutdown(wait=True)
+
+    assert len(seen_thread_ids) == 20
+    assert len({*seen_thread_ids}) == 1
