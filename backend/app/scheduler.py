@@ -300,6 +300,7 @@ class Scheduler:
                     *args,
                     sandbox_manager=self.sandbox_manager,
                     reviewer_adapter=self.reviewer_adapter_factory(),
+                    browser_service=self.browser_service,
                 )
             else:
                 await asyncio.to_thread(
@@ -307,6 +308,7 @@ class Scheduler:
                     *args,
                     sandbox_manager=self.sandbox_manager,
                     reviewer_adapter=self.reviewer_adapter_factory(),
+                    browser_service=self.browser_service,
                 )
         except Exception as exc:  # noqa: BLE001 - must never leave a task stuck "running" silently
             session.rollback()
