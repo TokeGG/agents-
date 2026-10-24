@@ -53,13 +53,17 @@ TEST_AUTH_TOKEN = "test-auth-token"
 
 
 @pytest.fixture()
-def client(monkeypatch):
+def client(monkeypatch, session_factory):
     """A TestClient wired to a shared in-memory SQLite DB (StaticPool, so the
     request session and any background-task session see the same data), a
     FakeModelAdapter the test can configure per-call via dependency overrides,
     and a default Authorization header so existing tests don't need to know
     about auth. Tests that exercise auth itself build their own TestClient
-    (see test_auth.py) instead of relying on this default header."""
+    (see test_auth.py) instead of relying on this default header.
+
+    Uses the `session_factory` fixture's engine (rather than a private one)
+    so a test that also takes `db_session` sees the same rows the API reads
+    and writes -- `db_session` is built from this same fixture."""
     from app.agent.model_adapter import FakeModelAdapter
     from app.agent.tools import ToolRegistry, ask_user_tool, http_get_tool, report_gap_tool
     from app.api import tasks as tasks_module
@@ -68,9 +72,7 @@ def client(monkeypatch):
 
     monkeypatch.setenv("AUTH_TOKEN", TEST_AUTH_TOKEN)
 
-    engine = _shared_sqlite_engine()
-    Base.metadata.create_all(engine)
-    TestSessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    TestSessionLocal = session_factory
 
     def override_get_session():
         session = TestSessionLocal()
