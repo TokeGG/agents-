@@ -145,6 +145,37 @@ def test_dynamic_connector_tool_redacts_secret_from_data_field_too(tmp_path, db_
     assert result["data"]["token"] == "***REDACTED***"
 
 
+def test_dynamic_connector_tool_redacts_json_escaped_secret_in_nested_data(tmp_path, db_session, task):
+    """A secret containing characters json.dumps escapes (a double-quote,
+    here) must still be redacted even though the raw JSON text contains the
+    escaped form (`\\"`), not the literal secret -- the raw-text redaction
+    pass alone cannot catch this; it requires walking the parsed structure
+    and comparing against the literal (decoded) secret value. Also nests
+    the secret inside a list inside `data` to prove the recursive walk
+    reaches lists, not just dict values."""
+    source = (
+        "import sys, json\n"
+        "path = sys.argv[1]\n"
+        "secret = open(path).read().strip()\n"
+        "print(json.dumps({'ok': True, 'output': 'done', 'data': {'items': [secret]}}))\n"
+    )
+    connector = Connector(name="quote_leaky_tool", service_name="quote_leaky", purpose="x",
+                           parameters_schema={"type": "object"}, source_code=source,
+                           required_hosts=[], status="active")
+    db_session.add(connector); db_session.commit()
+    manager = SandboxManager(FakeContainerRuntime(tmp_path), session_factory=lambda: db_session, cap=2)
+    vault = Vault(Vault.generate_key(), session_factory=lambda: db_session)
+    secret_value = 'secret-with-"-quote'
+    vault.set("quote_leaky", secret_value)
+    tool = DynamicConnectorTool(connector)
+    ctx = ToolContext(task_id=task.id, session=db_session, sandbox_manager=manager, vault=vault)
+
+    result = tool.run({}, ctx)
+    assert result["ok"] is True
+    assert secret_value not in json.dumps(result)
+    assert result["data"]["items"] == ["***REDACTED***"]
+
+
 def test_dynamic_connector_tool_shreds_secret_on_timeout(tmp_path, db_session, task):
     """A command timeout kills the whole shell session (including the
     in-shell `rm -f`) before it runs; the finally-block cleanup must still

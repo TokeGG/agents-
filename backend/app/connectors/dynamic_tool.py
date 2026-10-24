@@ -11,8 +11,10 @@ Security-critical invariants:
 - The secret file is removed from the sandbox unconditionally after the
   call, whether the connector script succeeds, fails, or crashes.
 - The raw secret value is redacted out of whatever the connector printed
-  before the result is returned, so it never reaches persisted state or
-  the model.
+  before the result is returned (both the raw text and, recursively, the
+  parsed JSON structure), so it never reaches persisted state or the
+  model, regardless of which field it was echoed into or how the
+  connector's own JSON-encoding escaped it.
 """
 
 from __future__ import annotations
@@ -29,6 +31,24 @@ from app.connectors.secret_injection import provision_secret_file, redact_secret
 def _quote(value: str) -> str:
     """Shell-quote a string for safe inclusion in a `sh -c`-style command."""
     return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _redact_structure(value, secret):
+    """Recursively redact `secret` out of every string in a decoded JSON
+    structure (dict values and keys, list items, at any depth). Operates on
+    already-decoded strings, so it catches a secret regardless of how the
+    connector's own json.dumps escaped it in the raw text (quotes,
+    backslashes, control characters, non-ASCII \\uXXXX escapes)."""
+    if isinstance(value, str):
+        return redact_secret(value, secret)
+    if isinstance(value, dict):
+        return {
+            _redact_structure(k, secret): _redact_structure(v, secret)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_structure(item, secret) for item in value]
+    return value
 
 
 class DynamicConnectorTool:
@@ -115,10 +135,10 @@ class DynamicConnectorTool:
             return {"ok": False, "output": output, "data": None}
 
         raw_output = exec_result["output"]
-        # Redact the raw JSON text before parsing, not just result["output"]
-        # after parsing: a connector could echo the secret into ANY field
-        # (e.g. "data"), and the model sees the whole parsed result, not
-        # just "output".
+        # First pass: redact the raw JSON text before parsing. This is
+        # cheap, catches the common case, and is the ONLY redaction
+        # available on the failure/parse-error paths below (there is no
+        # parsed structure to walk there).
         redacted_output = redact_secret(raw_output, secret)
         try:
             parsed = json.loads(redacted_output)
@@ -128,7 +148,18 @@ class DynamicConnectorTool:
         if not isinstance(parsed, dict):
             return {"ok": False, "output": redacted_output, "data": None}
 
-        return parsed
+        # Second pass: redact the PARSED structure recursively. The raw-text
+        # pass above only catches the secret if it appears byte-for-byte in
+        # the raw JSON text; json.dumps escapes characters when writing a
+        # string (a literal `"` becomes `\"`, `\` becomes `\\`, control
+        # characters and non-ASCII characters become `\uXXXX` under the
+        # default ensure_ascii=True), so a secret containing any of those
+        # survives the raw-text pass unredacted, then gets un-escaped back
+        # to its literal form by json.loads. Walking the already-decoded
+        # structure and redacting each string value against the literal
+        # secret (not its JSON-text form) catches the secret regardless of
+        # how the connector's own JSON-encoding escaped it.
+        return _redact_structure(parsed, secret)
 
     @staticmethod
     def _best_effort_shred(sandbox_manager, task_id: int, secret_path: str) -> None:
@@ -143,6 +174,10 @@ class DynamicConnectorTool:
         result/exception from the invocation itself.
         """
         try:
-            sandbox_manager.run_shell(task_id, f"rm -f {shlex.quote(secret_path)}")
+            # Explicit short timeout: this is a best-effort cleanup call
+            # after the main invocation may have already timed out (or
+            # failed); it must not itself block for the default 120s on a
+            # stuck container, stacking another ~2 minutes on top.
+            sandbox_manager.run_shell(task_id, f"rm -f {shlex.quote(secret_path)}", timeout=10)
         except Exception:
             pass
